@@ -256,7 +256,9 @@ def _distribution_by_label(ax, feature, numeric_feature, is_numeric, label, feat
     if is_numeric:
         good = numeric_feature[label == 0].dropna()
         bad = numeric_feature[label == 1].dropna()
-        ax.boxplot([good, bad], labels=["Good", "Bad"], showfliers=False)
+        ax.boxplot([good, bad], showfliers=False)
+        ax.set_xticks([1, 2])
+        ax.set_xticklabels(["Good", "Bad"])
         ax.set_ylabel(feature_name)
         ax.set_title("Good/Bad distribution")
     else:
