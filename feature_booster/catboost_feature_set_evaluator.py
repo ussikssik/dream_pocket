@@ -113,6 +113,95 @@ def evaluate_catboost_feature_sets(
     return combined, metric_df
 
 
+def evaluate_catboost_global_feature_sets(
+    selection_result: pd.DataFrame,
+    train_loader: DataLoader,
+    order_list: list[object],
+    full_pool_loader: DataLoader | None = None,
+    config: CatBoostFeatureSetEvalConfig | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Evaluate each method after pooling selected features across all orders.
+
+    This is the intended method-level comparison:
+    1. each method selects top-k features per order,
+    2. selected features from all orders are pooled by method,
+    3. one CatBoost model is trained per method on all Good/Bad rows from all orders,
+    4. final ranking uses global abs(mean SHAP Bad - mean SHAP Good).
+    """
+
+    config = config or CatBoostFeatureSetEvalConfig()
+    if selection_result.empty or not order_list:
+        return pd.DataFrame(), pd.DataFrame()
+
+    output_dir = config.output_dir
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    train_df = _concat_orders(train_loader, order_list)
+    full_pool_df = _concat_orders(full_pool_loader, order_list) if full_pool_loader is not None else None
+
+    reports: list[pd.DataFrame] = []
+    metrics: list[dict[str, object]] = []
+    for method, group in selection_result.groupby("method", sort=False):
+        feature_info = _global_selected_feature_info(group, config.selected_features_per_order)
+        features = feature_info["feature_name"].tolist()
+        selected_order_feature_count = int(feature_info["selected_order_feature_count"].sum()) if not feature_info.empty else 0
+
+        if not features:
+            metrics.append(_metric_record("ALL", method, "no_selected_features", 0))
+            continue
+
+        available_features = [feature for feature in features if feature in train_df.columns]
+        missing_features = [feature for feature in features if feature not in train_df.columns]
+        if not available_features:
+            metrics.append(_metric_record("ALL", method, "selected_features_missing_in_train_data", 0))
+            continue
+
+        report, metric = _fit_catboost_and_shap(
+            train_df=train_df,
+            order_id="ALL",
+            method=method,
+            features=available_features,
+            missing_features=missing_features,
+            config=config,
+        )
+        report = report.merge(feature_info, on="feature_name", how="left")
+        report["source_order_count"] = len(order_list)
+        report["global_unique_feature_count"] = len(available_features)
+        report["global_selected_order_feature_count"] = selected_order_feature_count
+        reports.append(report)
+
+        metric["source_order_count"] = len(order_list)
+        metric["global_unique_feature_count"] = len(available_features)
+        metric["global_selected_order_feature_count"] = selected_order_feature_count
+        metrics.append(metric)
+
+        if config.plot_enabled and metric.get("model_status") == "ok" and full_pool_df is not None:
+            plot_path, plot_warning = plot_shap_delta_top_features(
+                full_pool_df,
+                reports[-1][reports[-1]["shap_rank"] <= config.shap_top_n],
+                order_id="ALL",
+                method=str(method),
+                y_col=config.y_col,
+                label_col=config.label_col,
+                role_col=config.role_col,
+                output_dir=output_dir / "plots" if output_dir is not None else None,
+            )
+            reports[-1]["plot_path"] = str(plot_path) if plot_path else ""
+            reports[-1]["plot_warning"] = plot_warning
+
+    combined = pd.concat(reports, ignore_index=True) if reports else pd.DataFrame()
+    metric_df = pd.DataFrame(metrics)
+
+    if output_dir is not None:
+        combined.to_csv(output_dir / "catboost_global_shap_delta_by_method.csv", index=False, encoding="utf-8-sig")
+        top = combined[combined.get("shap_rank", pd.Series(dtype=float)) <= config.shap_top_n] if not combined.empty else combined
+        top.to_csv(output_dir / "catboost_global_shap_delta_top_features.csv", index=False, encoding="utf-8-sig")
+        metric_df.to_csv(output_dir / "catboost_global_model_metrics_by_method.csv", index=False, encoding="utf-8-sig")
+
+    return combined, metric_df
+
+
 def plot_shap_delta_top_features(
     full_pool_df: pd.DataFrame,
     shap_top: pd.DataFrame,
@@ -305,6 +394,50 @@ def _selected_features(group: pd.DataFrame, top_n: int) -> list[str]:
     return features
 
 
+def _global_selected_feature_info(group: pd.DataFrame, top_n_per_order: int) -> pd.DataFrame:
+    work = group.copy()
+    rank_col = "rank" if "rank" in work.columns else "final_rank" if "final_rank" in work.columns else ""
+    if rank_col:
+        work[rank_col] = pd.to_numeric(work[rank_col], errors="coerce")
+        work = work[work[rank_col] <= top_n_per_order]
+        work = work.sort_values(["order_id", rank_col] if "order_id" in work.columns else [rank_col])
+
+    if work.empty:
+        return pd.DataFrame(columns=["feature_name", "selected_order_feature_count", "selected_order_ids"])
+
+    records = []
+    seen: set[str] = set()
+    for feature in work["feature_name"].dropna().astype(str):
+        if feature in seen:
+            continue
+        seen.add(feature)
+        rows = work[work["feature_name"].astype(str) == feature]
+        order_ids = rows["order_id"].dropna().astype(str).tolist() if "order_id" in rows.columns else []
+        records.append(
+            {
+                "feature_name": feature,
+                "selected_order_feature_count": len(rows),
+                "selected_order_ids": ",".join(dict.fromkeys(order_ids)),
+                "best_selector_rank": float(rows[rank_col].min()) if rank_col else np.nan,
+                "mean_selector_score": float(pd.to_numeric(rows.get("score", pd.Series(dtype=float)), errors="coerce").mean())
+                if "score" in rows.columns
+                else np.nan,
+            }
+        )
+    return pd.DataFrame(records)
+
+
+def _concat_orders(loader: DataLoader | None, order_list: list[object]) -> pd.DataFrame:
+    if loader is None:
+        return pd.DataFrame()
+    frames = []
+    for order_id in order_list:
+        frame = loader(order_id).copy()
+        frame["_source_order_id"] = order_id
+        frames.append(frame)
+    return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+
+
 def _unavailable_report(
     order_id: object,
     method: object,
@@ -426,5 +559,5 @@ def _role_style(role: object) -> tuple[str, int, float]:
 
 def _slug(value: object) -> str:
     text = str(value).strip().lower()
-    text = re.sub(r"[^a-z0-9가-힣_-]+", "_", text)
+    text = re.sub(r"[^a-z0-9_-]+", "_", text)
     return text.strip("_") or "method"

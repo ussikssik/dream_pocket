@@ -18,6 +18,7 @@ from .alternative_selectors import (
 from .catboost_feature_set_evaluator import (
     CatBoostFeatureSetEvalConfig,
     evaluate_catboost_feature_sets,
+    evaluate_catboost_global_feature_sets,
     plot_shap_delta_top_features,
 )
 from .toy_truth_evaluator import (
@@ -43,6 +44,7 @@ __all__ = [
     "StatisticalConfig",
     "annotate_with_toy_truth",
     "evaluate_catboost_feature_sets",
+    "evaluate_catboost_global_feature_sets",
     "load_toy_feature_metadata",
     "plot_shap_delta_top_features",
     "save_toy_truth_evaluation",

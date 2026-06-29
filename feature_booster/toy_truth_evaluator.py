@@ -147,6 +147,24 @@ def summarize_toy_truth_hits(
             record["mean_shap_delta_abs"] = float(pd.to_numeric(group["shap_delta_abs"], errors="coerce").mean())
         records.append(record)
 
+    columns = [
+        *group_cols,
+        "evaluated_top_k",
+        "selected_count",
+        "target_defect_a_hit_count",
+        "target_defect_a_precision",
+        "nonlinear_a_hit_count",
+        "sparse_a_hit_count",
+        "other_defect_hit_count",
+        "tool_confounded_hit_count",
+        "noise_hit_count",
+        "unknown_hit_count",
+        "toy_truth_penalty_count",
+        "toy_truth_score",
+        "dominant_signal_subtype",
+    ]
+    if not records:
+        return pd.DataFrame(columns=columns)
     return pd.DataFrame(records).sort_values(group_cols).reset_index(drop=True)
 
 

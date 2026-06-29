@@ -275,12 +275,12 @@ catboost_shap_gap     CatBoost SHAP의 Bad 평균과 Good 평균 차이가 큰 f
 stability_consensus   bootstrap 반복에서 계속 상위권에 남는 feature ranking
 ```
 
-이 스크립트는 selector별로 order당 `--top-k`개 feature를 먼저 고르고, 그 feature set으로 CatBoost를 다시 학습한 뒤 `abs(mean SHAP Bad - mean SHAP Good)` 기준 top feature를 산출합니다. 기본값은 order/method당 20개 선발, SHAP delta top 15개 리포트입니다.
+이 스크립트는 selector별로 order당 `--top-k`개 feature를 먼저 고른 뒤, 모든 order의 선택 결과를 method별로 합칩니다. 그 다음 모든 order의 Good/Bad rows를 합쳐 method별 global CatBoost를 한 번씩 학습하고, `abs(mean SHAP Bad - mean SHAP Good)` 기준 top feature를 산출합니다. 기본값은 order/method당 15개 선발, global SHAP delta top 15개 리포트입니다.
 
 빠른 테스트:
 
 ```powershell
-python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 20 --shap-top-n 15 --stability-rounds 2
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 15 --shap-top-n 15 --stability-rounds 2
 ```
 
 기본 크기 실행:
@@ -301,9 +301,10 @@ notebooks/selector_catboost_shap_review.ipynb
 outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
 outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
 outputs/wide_toy_selector_comparison/selector_comparison_toy_truth_summary.csv
-outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_shap_delta_top_features.csv
-outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_model_metrics_by_method.csv
-outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_shap_delta_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_top_features.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_model_metrics_by_method.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_method_scoreboard.csv
 outputs/wide_toy_selector_comparison/catboost_post_eval/plots/
 ```
 
