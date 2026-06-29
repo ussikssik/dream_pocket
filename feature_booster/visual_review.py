@@ -143,6 +143,87 @@ def plot_order_top_features(
     return figures
 
 
+def plot_feature_process_window(
+    df: pd.DataFrame,
+    feature_name: str,
+    y_col: str = "eds_bin_a_wf_mean",
+    label_col: str = "target_bad_a",
+    time_col: str = "process_run_seq",
+    role_col: str = "booster_sample_role",
+    evidence_row: pd.Series | None = None,
+):
+    """Plot one feature and y over process order to inspect excursion windows."""
+
+    plt = _require_matplotlib()
+
+    if feature_name not in df.columns:
+        raise ValueError(f"feature '{feature_name}' is missing from df")
+    if y_col not in df.columns:
+        raise ValueError(f"y_col '{y_col}' is missing from df")
+
+    if time_col in df.columns:
+        x = pd.to_numeric(df[time_col], errors="coerce")
+    else:
+        x = pd.Series(np.arange(1, len(df) + 1), index=df.index)
+
+    feature = pd.to_numeric(df[feature_name], errors="coerce")
+    y = pd.to_numeric(df[y_col], errors="coerce")
+    roles = _review_roles(df, label_col=label_col, role_col=role_col)
+
+    fig, axes = plt.subplots(2, 1, figsize=(13, 7), sharex=True)
+    fig.suptitle(_title(feature_name, evidence_row), fontsize=13, fontweight="bold")
+
+    _scatter_by_role(axes[0], x, feature, roles)
+    axes[0].set_ylabel(feature_name)
+    axes[0].set_title("feature by process sequence")
+    axes[0].grid(alpha=0.25)
+
+    _scatter_by_role(axes[1], x, y, roles)
+    axes[1].set_xlabel(time_col if time_col in df.columns else "row_order")
+    axes[1].set_ylabel(y_col)
+    axes[1].set_title("y by process sequence")
+    axes[1].grid(alpha=0.25)
+
+    handles, labels = axes[0].get_legend_handles_labels()
+    if handles:
+        axes[0].legend(handles, labels, loc="best")
+    fig.tight_layout(rect=[0, 0, 1, 0.94])
+    return fig
+
+
+def plot_order_top_feature_process_windows(
+    evidence: pd.DataFrame,
+    data_dir: Path | str,
+    order_id: int,
+    y_col: str = "eds_bin_a_wf_mean",
+    top_n: int = 3,
+    file_pattern: str = "wide_order_{order_id:03d}_full_pool.csv",
+    label_col: str = "target_bad_a",
+    time_col: str = "process_run_seq",
+    role_col: str = "booster_sample_role",
+) -> list[object]:
+    """Plot process-window views for top-ranked features using the full pool file."""
+
+    top = select_top_features(evidence, order_id=order_id, top_n=top_n)
+    feature_names = top["feature_name"].tolist()
+    base_cols = [label_col, y_col, time_col, role_col]
+    df = load_order_slice(data_dir, order_id, feature_names, file_pattern=file_pattern, base_cols=base_cols)
+    figures = []
+    for _, row in top.iterrows():
+        figures.append(
+            plot_feature_process_window(
+                df,
+                feature_name=row["feature_name"],
+                y_col=y_col,
+                label_col=label_col,
+                time_col=time_col,
+                role_col=role_col,
+                evidence_row=row,
+            )
+        )
+    return figures
+
+
 def make_review_decision_table(
     evidence: pd.DataFrame,
     data_dir: Path | str,
@@ -311,6 +392,33 @@ def _presence_by_label(ax, feature, label, feature_name):
     for idx, value in enumerate(values):
         if pd.notna(value):
             ax.text(idx, min(value + 0.03, 1.02), f"{value:.1%}", ha="center")
+
+
+def _review_roles(df: pd.DataFrame, label_col: str, role_col: str) -> pd.Series:
+    if role_col in df.columns:
+        return df[role_col].astype("object").where(df[role_col].notna(), "Ignored")
+    if label_col in df.columns:
+        label = pd.to_numeric(df[label_col], errors="coerce").fillna(0).astype(int)
+        return pd.Series(np.where(label == 1, "Bad", "Good"), index=df.index)
+    return pd.Series("All", index=df.index)
+
+
+def _scatter_by_role(ax, x: pd.Series, y: pd.Series, roles: pd.Series) -> None:
+    styles = [
+        ("Ignored", "#9e9e9e", 14, 0.25),
+        ("Good", "#1f77b4", 20, 0.65),
+        ("Bad", "#d62728", 24, 0.75),
+        ("All", "#4c4c4c", 18, 0.55),
+    ]
+    plotted = set()
+    for role, color, size, alpha in styles:
+        mask = roles == role
+        if mask.any():
+            ax.scatter(x[mask], y[mask], s=size, alpha=alpha, c=color, label=role)
+            plotted.add(role)
+    for role in sorted(set(roles.dropna()) - plotted):
+        mask = roles == role
+        ax.scatter(x[mask], y[mask], s=18, alpha=0.45, label=str(role))
 
 
 def _facet_concentration(df: pd.DataFrame, feature_name: str, facet_col: str) -> float:

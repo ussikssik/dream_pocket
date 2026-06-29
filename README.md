@@ -221,3 +221,43 @@ RESULT_PATH = outputs/wide_toy_semiconductor_booster/combined_feature_evidence.c
 Y_COL = eds_bin_a_wf_mean
 FACET_COL = equipment_name
 ```
+
+## Realistic wide toyset update
+
+Wide toyset은 이제 order별 전체 wafer pool을 먼저 만든 뒤, 그 안에서 booster용 Good/Bad 샘플만 발췌합니다.
+
+기본값:
+
+```text
+full wafer rows per order: 2,500
+booster Good rows per order: 180
+booster Bad rows per order: 70
+candidate features per order: 10,000
+```
+
+생성되는 파일:
+
+```text
+data/toy_semiconductor_wide/wide_order_001_full_pool.csv  # 전체 wafer pool
+data/toy_semiconductor_wide/wide_order_001.csv            # booster 입력용 Good/Bad slice
+```
+
+기본 실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate
+```
+
+빠른 테스트:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000
+```
+
+시각 검증은 아래 노트북에서 합니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+기존 Good/Bad scatter와 boxplot 외에 full pool 기준 process sequence plot도 추가되어, 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지 확인할 수 있습니다.

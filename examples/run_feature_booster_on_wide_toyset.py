@@ -16,7 +16,13 @@ from feature_booster import (  # noqa: E402
     RedundancyConfig,
     StatisticalConfig,
 )
-from generate_wide_toy_semiconductor_dataset import DEFAULT_OUTPUT_DIR, generate_dataset  # noqa: E402
+from generate_wide_toy_semiconductor_dataset import (  # noqa: E402
+    DEFAULT_BOOSTER_BAD_ROWS,
+    DEFAULT_BOOSTER_GOOD_ROWS,
+    DEFAULT_FULL_ROWS_PER_ORDER,
+    DEFAULT_OUTPUT_DIR,
+    generate_dataset,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -51,6 +57,11 @@ def run_booster(
         sample_id_cols=("sample_id", "wafer_id"),
         exclude_cols=(
             "order_id",
+            "process_run_seq",
+            "process_elapsed_ratio",
+            "run_block_id",
+            "booster_sample_role",
+            "is_booster_sample",
             "eds_bin_no_wf_mean",
             "eds_bin_a_wf_mean",
             "eds_bin_b_wf_mean",
@@ -78,8 +89,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--data-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_REPORT_DIR)
     parser.add_argument("--orders", type=int, nargs="+", default=[1, 2, 3])
-    parser.add_argument("--rows", type=int, default=240)
+    parser.add_argument(
+        "--rows",
+        type=int,
+        default=DEFAULT_FULL_ROWS_PER_ORDER,
+        help="Full wafer rows per order before Good/Bad sampling.",
+    )
     parser.add_argument("--features-per-order", type=int, default=10000)
+    parser.add_argument("--booster-good-rows", type=int, default=DEFAULT_BOOSTER_GOOD_ROWS)
+    parser.add_argument("--booster-bad-rows", type=int, default=DEFAULT_BOOSTER_BAD_ROWS)
     parser.add_argument("--top-k", type=int, default=10)
     parser.add_argument("--bootstrap-rounds", type=int, default=5)
     parser.add_argument("--catboost", action="store_true")
@@ -89,17 +107,55 @@ def parse_args() -> argparse.Namespace:
 
 def ensure_dataset(args: argparse.Namespace) -> None:
     missing = [order_id for order_id in args.orders if not (args.data_dir / f"wide_order_{order_id:03d}.csv").exists()]
-    if args.regenerate or missing:
+    if args.regenerate or missing or not _existing_dataset_matches(args):
         max_order = max(args.orders)
         summary = generate_dataset(
             output_dir=args.data_dir,
             orders=max_order,
             rows=args.rows,
             features_per_order=args.features_per_order,
+            booster_good_rows=args.booster_good_rows,
+            booster_bad_rows=args.booster_bad_rows,
             overwrite=args.regenerate,
         )
         print("Generated wide toy dataset:")
         print(summary.to_string(index=False))
+
+
+def _existing_dataset_matches(args: argparse.Namespace) -> bool:
+    summary_path = args.data_dir / "wide_target_summary_by_order.csv"
+    if not summary_path.exists():
+        return False
+
+    try:
+        summary = pd.read_csv(summary_path)
+    except Exception:
+        return False
+
+    required_cols = {
+        "order_id",
+        "full_rows",
+        "candidate_feature_count",
+        "booster_good_count",
+        "booster_bad_count",
+    }
+    if not required_cols.issubset(summary.columns):
+        return False
+
+    for order_id in args.orders:
+        row = summary[summary["order_id"] == order_id]
+        if row.empty:
+            return False
+        values = row.iloc[0]
+        if int(values["full_rows"]) != int(args.rows):
+            return False
+        if int(values["candidate_feature_count"]) != int(args.features_per_order):
+            return False
+        if int(values["booster_good_count"]) != int(args.booster_good_rows):
+            return False
+        if int(values["booster_bad_count"]) != int(args.booster_bad_rows):
+            return False
+    return True
 
 
 def main() -> int:
