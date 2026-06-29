@@ -12,7 +12,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from feature_booster import (  # noqa: E402
     AlternativeFeatureSelector,
     AlternativeSelectorConfig,
+    CatBoostFeatureSetEvalConfig,
     CatBoostProbeConfig,
+    evaluate_catboost_feature_sets,
     summarize_method_overlap,
 )
 from generate_wide_toy_semiconductor_dataset import (  # noqa: E402
@@ -93,10 +95,12 @@ def run_comparison(
     output_dir: Path,
     order_list: list[int],
     top_k: int,
+    shap_top_n: int,
     methods: tuple[str, ...],
     include_evidence_booster: bool,
+    run_catboost_eval: bool,
     stability_rounds: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     output_dir.mkdir(parents=True, exist_ok=True)
     pieces = []
 
@@ -126,7 +130,53 @@ def run_comparison(
 
     overlap = summarize_method_overlap(comparison)
     overlap.to_csv(output_dir / "method_overlap_jaccard.csv", index=False, encoding="utf-8-sig")
-    return comparison, overlap
+
+    shap_delta = pd.DataFrame()
+    model_metrics = pd.DataFrame()
+    if run_catboost_eval and not comparison.empty:
+        shap_delta, model_metrics = run_post_selection_catboost_eval(
+            data_dir=data_dir,
+            output_dir=output_dir / "catboost_post_eval",
+            selection_result=comparison,
+            selected_features_per_order=top_k,
+            shap_top_n=shap_top_n,
+        )
+    return comparison, overlap, shap_delta, model_metrics
+
+
+def run_post_selection_catboost_eval(
+    data_dir: Path,
+    output_dir: Path,
+    selection_result: pd.DataFrame,
+    selected_features_per_order: int = 20,
+    shap_top_n: int = 15,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    def load_train_order(order_id: int) -> pd.DataFrame:
+        return pd.read_csv(data_dir / f"wide_order_{int(order_id):03d}.csv")
+
+    def load_full_pool_order(order_id: int) -> pd.DataFrame:
+        return pd.read_csv(data_dir / f"wide_order_{int(order_id):03d}_full_pool.csv")
+
+    config = CatBoostFeatureSetEvalConfig(
+        label_col="target_bad_a",
+        positive_label=1,
+        y_col="eds_bin_a_wf_mean",
+        role_col="booster_sample_role",
+        selected_features_per_order=selected_features_per_order,
+        shap_top_n=shap_top_n,
+        output_dir=output_dir,
+        plot_enabled=True,
+        iterations=300,
+        depth=4,
+        learning_rate=0.05,
+        verbose=False,
+    )
+    return evaluate_catboost_feature_sets(
+        selection_result=selection_result,
+        train_loader=load_train_order,
+        full_pool_loader=load_full_pool_order,
+        config=config,
+    )
 
 
 def _normalize_evidence_booster(evidence: pd.DataFrame) -> pd.DataFrame:
@@ -162,7 +212,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--features-per-order", type=int, default=10000)
     parser.add_argument("--booster-good-rows", type=int, default=DEFAULT_BOOSTER_GOOD_ROWS)
     parser.add_argument("--booster-bad-rows", type=int, default=DEFAULT_BOOSTER_BAD_ROWS)
-    parser.add_argument("--top-k", type=int, default=10)
+    parser.add_argument("--top-k", type=int, default=20, help="Features selected per order/method before CatBoost post-evaluation.")
+    parser.add_argument("--shap-top-n", type=int, default=15, help="Top SHAP-delta features to report and plot per order/method.")
     parser.add_argument("--stability-rounds", type=int, default=8)
     parser.add_argument(
         "--methods",
@@ -171,6 +222,7 @@ def parse_args() -> argparse.Namespace:
         choices=["nonparametric_random", "distance", "catboost_shap_gap", "stability_consensus"],
     )
     parser.add_argument("--skip-evidence-booster", action="store_true")
+    parser.add_argument("--skip-catboost-eval", action="store_true")
     parser.add_argument("--regenerate", action="store_true")
     return parser.parse_args()
 
@@ -178,13 +230,15 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     ensure_dataset(args)
-    comparison, overlap = run_comparison(
+    comparison, overlap, shap_delta, model_metrics = run_comparison(
         data_dir=args.data_dir,
         output_dir=args.output_dir,
         order_list=args.orders,
         top_k=args.top_k,
+        shap_top_n=args.shap_top_n,
         methods=tuple(args.methods),
         include_evidence_booster=not args.skip_evidence_booster,
+        run_catboost_eval=not args.skip_catboost_eval,
         stability_rounds=args.stability_rounds,
     )
 
@@ -193,6 +247,28 @@ def main() -> int:
     print(comparison[existing].to_string(index=False))
     print(f"\nSaved comparison to {args.output_dir / 'combined_selector_comparison.csv'}")
     print(f"Saved overlap matrix to {args.output_dir / 'method_overlap_jaccard.csv'}")
+    if not shap_delta.empty:
+        top = shap_delta[shap_delta["shap_rank"] <= args.shap_top_n]
+        display_shap_cols = [
+            "order_id",
+            "method",
+            "shap_rank",
+            "feature_name",
+            "shap_delta_abs",
+            "model_auc_train",
+            "evaluation_warning",
+            "plot_path",
+        ]
+        existing_shap = [col for col in display_shap_cols if col in top.columns]
+        print("\nCatBoost SHAP delta top features:")
+        print(top[existing_shap].to_string(index=False))
+        print(f"\nSaved CatBoost SHAP delta to {args.output_dir / 'catboost_post_eval' / 'catboost_shap_delta_top_features.csv'}")
+    elif not args.skip_catboost_eval:
+        print("\nCatBoost post-evaluation produced no SHAP rows. Check catboost_post_eval CSV warnings.")
+
+    if not model_metrics.empty:
+        print("\nCatBoost model metrics:")
+        print(model_metrics.to_string(index=False))
     if not overlap.empty:
         print("\nMethod overlap:")
         print(overlap.to_string(index=False))

@@ -15,6 +15,11 @@ from .alternative_selectors import (
     AlternativeSelectorConfig,
     summarize_method_overlap,
 )
+from .catboost_feature_set_evaluator import (
+    CatBoostFeatureSetEvalConfig,
+    evaluate_catboost_feature_sets,
+    plot_shap_delta_top_features,
+)
 from .order_runner import DefectAFeatureEvidenceBooster
 
 __all__ = [
@@ -22,6 +27,7 @@ __all__ = [
     "AlternativeSelectorConfig",
     "AsymmetricSignalConfig",
     "BoosterConfig",
+    "CatBoostFeatureSetEvalConfig",
     "CatBoostProbeConfig",
     "ConfoundingConfig",
     "DefectAFeatureEvidenceBooster",
@@ -29,5 +35,7 @@ __all__ = [
     "RankingConfig",
     "RedundancyConfig",
     "StatisticalConfig",
+    "evaluate_catboost_feature_sets",
+    "plot_shap_delta_top_features",
     "summarize_method_overlap",
 ]

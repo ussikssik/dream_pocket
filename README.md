@@ -275,10 +275,12 @@ catboost_shap_gap     CatBoost SHAP의 Bad 평균과 Good 평균 차이가 큰 f
 stability_consensus   bootstrap 반복에서 계속 상위권에 남는 feature ranking
 ```
 
+이 스크립트는 selector별로 order당 `--top-k`개 feature를 먼저 고르고, 그 feature set으로 CatBoost를 다시 학습한 뒤 `abs(mean SHAP Bad - mean SHAP Good)` 기준 top feature를 산출합니다. 기본값은 order/method당 20개 선발, SHAP delta top 15개 리포트입니다.
+
 빠른 테스트:
 
 ```powershell
-python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 5 --stability-rounds 2
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 20 --shap-top-n 15 --stability-rounds 2
 ```
 
 기본 크기 실행:
@@ -292,6 +294,9 @@ python examples/run_selector_comparison_on_wide_toyset.py --regenerate
 ```text
 outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
 outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_shap_delta_top_features.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_model_metrics_by_method.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/plots/
 ```
 
 `catboost_shap_gap`을 실제 SHAP 기준으로 쓰려면 CatBoost가 필요합니다.
@@ -299,3 +304,5 @@ outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
 ```powershell
 python -m pip install catboost
 ```
+
+CatBoost가 설치되어 있지 않으면 post-evaluation은 CSV에 `catboost_not_installed` 경고를 남기고 종료합니다. Plot은 `matplotlib`이 필요합니다.
