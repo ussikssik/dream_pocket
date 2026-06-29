@@ -135,3 +135,64 @@ python examples/run_feature_booster_on_toyset.py
 ```text
 outputs/toy_semiconductor_booster/
 ```
+
+## Wide toyset, 10,000+ features per order
+
+좀 더 실제 상황에 가깝게 order별 1만 개 이상의 candidate feature를 만들고 싶으면 wide toyset을 사용합니다.
+
+기본값은 다음과 같습니다.
+
+```text
+orders: 3
+rows per order: 240
+generated candidate features per order: 10,000
+```
+
+생성:
+
+```powershell
+python examples/generate_wide_toy_semiconductor_dataset.py
+```
+
+실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py
+```
+
+생성 데이터 위치:
+
+```text
+data/toy_semiconductor_wide/
+```
+
+결과 위치:
+
+```text
+outputs/wide_toy_semiconductor_booster/
+```
+
+PC가 느리면 feature 수를 줄여 먼저 테스트할 수 있습니다.
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 --rows 120 --features-per-order 1000
+```
+
+다시 1만 feature로 돌리려면:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 3 --rows 240 --features-per-order 10000
+```
+
+CatBoost SHAP probe까지 켜려면 `catboost`를 설치한 뒤 `--catboost` 옵션을 붙입니다.
+
+```powershell
+python -m pip install catboost
+python examples/run_feature_booster_on_wide_toyset.py --catboost
+```
+
+VS Code에서 노트북으로 보고 싶으면 아래 파일을 엽니다.
+
+```text
+notebooks/feature_booster_wide_toyset.ipynb
+```
