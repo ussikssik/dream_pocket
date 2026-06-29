@@ -26,6 +26,7 @@ config = BoosterConfig(
     positive_label=1,
     group_cols=("lot_id", "tool_id"),
     sample_id_cols=("wafer_id",),
+    exclude_cols=("eds_bin_no_wf_mean", "eds_yield_wf_mean"),
 )
 
 booster = DefectAFeatureEvidenceBooster(load_order, config)
@@ -83,4 +84,54 @@ config = BoosterConfig(
 
 ```powershell
 python examples/run_feature_booster_example.py
+```
+
+## Toy semiconductor dataset
+
+실제 실행 테스트용 toy dataset은 아래 명령으로 생성합니다.
+
+```powershell
+python examples/generate_toy_semiconductor_dataset.py
+```
+
+생성 위치:
+
+```text
+data/toy_semiconductor/
+  order_001.csv
+  order_002.csv
+  order_003.csv
+  order_004.csv
+  order_005.csv
+  toy_semiconductor_all_orders.csv
+  feature_metadata.csv
+  target_summary_by_order.csv
+```
+
+포함된 컬럼 예시는 다음과 같습니다.
+
+```text
+sensor_*                  공정 sensor 값
+measure_*                 계측 measure 값
+midproc_defect_*_count    최종 불량이 아닌 중간공정 defect count
+equipment_name            설비명
+chamber_id                chamber
+process_step              공정 step
+process_time_sec          공정 시간
+eds_*                     최종 EDS 기반 y/검증 지표
+target_bad_a              booster가 사용하는 binary label
+```
+
+`eds_*`와 `sim_*` 컬럼은 결과/검증용 컬럼이라 booster feature에서 제외합니다.
+
+Toy dataset으로 booster를 실행하려면:
+
+```powershell
+python examples/run_feature_booster_on_toyset.py
+```
+
+결과 CSV는 아래 폴더에 저장됩니다.
+
+```text
+outputs/toy_semiconductor_booster/
 ```

@@ -62,8 +62,9 @@ def infer_feature_columns(
     label_col: str,
     group_cols: Iterable[str],
     sample_id_cols: Iterable[str],
+    exclude_cols: Iterable[str] = (),
 ) -> list[str]:
-    excluded = {label_col, *group_cols, *sample_id_cols}
+    excluded = {label_col, *group_cols, *sample_id_cols, *exclude_cols}
     return [col for col in df.columns if col not in excluded]
 
 
