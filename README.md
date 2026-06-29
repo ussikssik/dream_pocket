@@ -289,6 +289,12 @@ python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 
 python examples/run_selector_comparison_on_wide_toyset.py --regenerate
 ```
 
+VS Code/Jupyter에서 표와 plot을 보면서 실행하려면 아래 노트북을 여세요.
+
+```text
+notebooks/selector_catboost_shap_review.ipynb
+```
+
 결과 파일:
 
 ```text
