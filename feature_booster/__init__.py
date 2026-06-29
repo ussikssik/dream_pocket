@@ -20,6 +20,12 @@ from .catboost_feature_set_evaluator import (
     evaluate_catboost_feature_sets,
     plot_shap_delta_top_features,
 )
+from .toy_truth_evaluator import (
+    annotate_with_toy_truth,
+    load_toy_feature_metadata,
+    save_toy_truth_evaluation,
+    summarize_toy_truth_hits,
+)
 from .order_runner import DefectAFeatureEvidenceBooster
 
 __all__ = [
@@ -35,7 +41,11 @@ __all__ = [
     "RankingConfig",
     "RedundancyConfig",
     "StatisticalConfig",
+    "annotate_with_toy_truth",
     "evaluate_catboost_feature_sets",
+    "load_toy_feature_metadata",
     "plot_shap_delta_top_features",
+    "save_toy_truth_evaluation",
+    "summarize_toy_truth_hits",
     "summarize_method_overlap",
 ]

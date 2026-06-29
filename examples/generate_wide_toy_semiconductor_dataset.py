@@ -6,6 +6,11 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
+try:
+    from feature_booster.toy_truth_evaluator import infer_signal_subtype
+except Exception:  # pragma: no cover - script can still run standalone
+    infer_signal_subtype = None
+
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "data" / "toy_semiconductor_wide"
@@ -15,7 +20,7 @@ DEFAULT_FULL_ROWS_PER_ORDER = 2500
 DEFAULT_BOOSTER_GOOD_ROWS = 180
 DEFAULT_BOOSTER_BAD_ROWS = 70
 DEFAULT_FEATURES_PER_ORDER = 10000
-DATASET_VERSION = "wide_toyset_v3_nonlinear"
+DATASET_VERSION = "wide_toyset_v4_truth_labels"
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -420,13 +425,14 @@ def _plant_signal_blocks(
 def build_feature_metadata(features_per_order: int) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for feature in build_feature_names(features_per_order):
-        if "_a_" in feature or feature.startswith("bad_only_a_") or feature.startswith("good_only_stable_signature_"):
+        signal_subtype = infer_signal_subtype(feature) if infer_signal_subtype is not None else "unknown"
+        if signal_subtype.startswith("defect_a_"):
             prior = 0.80
             family = "planted_defect_a"
-        elif feature.startswith("tool_confounded"):
+        elif signal_subtype == "tool_confounded":
             prior = 0.20
             family = "tool_confounded"
-        elif feature.startswith("defect_"):
+        elif signal_subtype.startswith("other_defect_"):
             prior = 0.30
             family = "other_defect_signal"
         else:
@@ -439,6 +445,7 @@ def build_feature_metadata(features_per_order: int) -> pd.DataFrame:
                 "process_area": feature.split("_")[0],
                 "unit": "synthetic",
                 "domain_prior_score": prior,
+                "signal_subtype": signal_subtype,
             }
         )
     return pd.DataFrame(rows)

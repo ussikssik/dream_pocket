@@ -15,6 +15,7 @@ from feature_booster import (  # noqa: E402
     CatBoostFeatureSetEvalConfig,
     CatBoostProbeConfig,
     evaluate_catboost_feature_sets,
+    save_toy_truth_evaluation,
     summarize_method_overlap,
 )
 from generate_wide_toy_semiconductor_dataset import (  # noqa: E402
@@ -130,6 +131,16 @@ def run_comparison(
 
     overlap = summarize_method_overlap(comparison)
     overlap.to_csv(output_dir / "method_overlap_jaccard.csv", index=False, encoding="utf-8-sig")
+    metadata_path = data_dir / "wide_feature_metadata.csv"
+    if metadata_path.exists() and not comparison.empty:
+        save_toy_truth_evaluation(
+            comparison,
+            metadata_path=metadata_path,
+            output_dir=output_dir,
+            prefix="selector_comparison",
+            top_k=top_k,
+            rank_col="rank",
+        )
 
     shap_delta = pd.DataFrame()
     model_metrics = pd.DataFrame()
@@ -141,6 +152,15 @@ def run_comparison(
             selected_features_per_order=top_k,
             shap_top_n=shap_top_n,
         )
+        if metadata_path.exists() and not shap_delta.empty:
+            save_toy_truth_evaluation(
+                shap_delta,
+                metadata_path=metadata_path,
+                output_dir=output_dir / "catboost_post_eval",
+                prefix="catboost_shap_delta",
+                top_k=shap_top_n,
+                rank_col="shap_rank",
+            )
     return comparison, overlap, shap_delta, model_metrics
 
 

@@ -300,9 +300,23 @@ notebooks/selector_catboost_shap_review.ipynb
 ```text
 outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
 outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
+outputs/wide_toy_selector_comparison/selector_comparison_toy_truth_summary.csv
 outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_shap_delta_top_features.csv
 outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_model_metrics_by_method.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_shap_delta_toy_truth_summary.csv
 outputs/wide_toy_selector_comparison/catboost_post_eval/plots/
+```
+
+Toyset은 synthetic planted feature를 알고 있으므로, `*_toy_truth_summary.csv`에서 method별 정답 대용 평가를 볼 수 있습니다.
+
+```text
+target_defect_a_precision   선택 feature 중 실제 심어둔 A 관련 feature 비율
+nonlinear_a_hit_count       nonlinear/interaction A feature를 잡은 개수
+sparse_a_hit_count          one-sided sparse A feature를 잡은 개수
+other_defect_hit_count      B/C/D 등 다른 불량 feature를 잡은 개수
+tool_confounded_hit_count   tool confounding feature를 잡은 개수
+noise_hit_count             noise feature를 잡은 개수
+toy_truth_score             A hit reward - non-A/noise/confound penalty 요약 점수
 ```
 
 `catboost_shap_gap`을 실제 SHAP 기준으로 쓰려면 CatBoost가 필요합니다.
