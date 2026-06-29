@@ -260,4 +260,4 @@ python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 --
 notebooks/feature_review_dashboard.ipynb
 ```
 
-기존 Good/Bad scatter와 boxplot 외에 full pool 기준 process sequence plot도 추가되어, 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지 확인할 수 있습니다.
+Visual review dashboard의 main scatter/boxplot은 full pool 파일을 읽어서 `Ignored`, `Good`, `Bad`를 함께 보여줍니다. 별도의 process sequence plot에서는 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지도 확인할 수 있습니다.

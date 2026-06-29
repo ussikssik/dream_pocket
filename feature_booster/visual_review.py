@@ -60,15 +60,16 @@ def plot_feature_review(
     y_col: str,
     label_col: str = "target_bad_a",
     facet_col: str = "equipment_name",
+    role_col: str | None = "booster_sample_role",
     evidence_row: pd.Series | None = None,
 ):
     """Create a compact 2x2 review chart for one feature.
 
     The plot checks:
     1. feature-vs-y scatter
-    2. Good/Bad feature distribution
+    2. Ignored/Good/Bad feature distribution when a role column is available
     3. facet-level median feature and bad rate
-    4. feature presence by Good/Bad
+    4. feature presence by role
     """
 
     plt = _require_matplotlib()
@@ -83,16 +84,17 @@ def plot_feature_review(
     feature = df[feature_name]
     y = pd.to_numeric(df[y_col], errors="coerce")
     label = pd.to_numeric(df[label_col], errors="coerce").fillna(0).astype(int)
+    roles = _review_roles(df, label_col=label_col, role_col=role_col)
     numeric_feature = pd.to_numeric(feature, errors="coerce")
     is_numeric = numeric_feature.notna().sum() >= max(3, int(feature.notna().sum() * 0.8))
 
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
     fig.suptitle(_title(feature_name, evidence_row), fontsize=13, fontweight="bold")
 
-    _scatter_feature_y(axes[0, 0], feature, numeric_feature, is_numeric, y, label, feature_name, y_col)
-    _distribution_by_label(axes[0, 1], feature, numeric_feature, is_numeric, label, feature_name)
+    _scatter_feature_y(axes[0, 0], feature, numeric_feature, is_numeric, y, roles, feature_name, y_col)
+    _distribution_by_role(axes[0, 1], feature, numeric_feature, is_numeric, roles, feature_name)
     _facet_summary(axes[1, 0], df, feature_name, numeric_feature, is_numeric, label, facet_col)
-    _presence_by_label(axes[1, 1], feature, label, feature_name)
+    _presence_by_role(axes[1, 1], feature, roles, feature_name)
 
     fig.tight_layout(rect=[0, 0, 1, 0.95])
     return fig
@@ -107,6 +109,7 @@ def plot_order_top_features(
     file_pattern: str = "wide_order_{order_id:03d}.csv",
     label_col: str = "target_bad_a",
     facet_col: str = "equipment_name",
+    role_col: str | None = "booster_sample_role",
     extra_cols: Iterable[str] = (),
 ) -> list[object]:
     """Load one order and plot review charts for its top features."""
@@ -124,6 +127,7 @@ def plot_order_top_features(
         "chamber_id",
         label_col,
         y_col,
+        *([role_col] if role_col else []),
         *extra_cols,
     ]
     df = load_order_slice(data_dir, order_id, feature_names, file_pattern=file_pattern, base_cols=base_cols)
@@ -137,6 +141,7 @@ def plot_order_top_features(
                 y_col=y_col,
                 label_col=label_col,
                 facet_col=facet_col,
+                role_col=role_col,
                 evidence_row=row,
             )
         )
@@ -233,6 +238,7 @@ def make_review_decision_table(
     file_pattern: str = "wide_order_{order_id:03d}.csv",
     label_col: str = "target_bad_a",
     facet_col: str = "equipment_name",
+    role_col: str | None = None,
 ) -> pd.DataFrame:
     """Build a compact table with plot-adjacent diagnostics for top features."""
 
@@ -243,11 +249,12 @@ def make_review_decision_table(
         order_id,
         feature_names,
         file_pattern=file_pattern,
-        base_cols=[label_col, y_col, facet_col],
+        base_cols=[label_col, y_col, facet_col, *([role_col] if role_col else [])],
     )
     records = []
     label = pd.to_numeric(df[label_col], errors="coerce").fillna(0).astype(int)
     y = pd.to_numeric(df[y_col], errors="coerce")
+    roles = _review_roles(df, label_col=label_col, role_col=role_col)
 
     for _, row in top.iterrows():
         feature_name = row["feature_name"]
@@ -257,6 +264,11 @@ def make_review_decision_table(
         bad_presence = float(presence[label == 1].mean()) if (label == 1).any() else np.nan
         good_presence = float(presence[label == 0].mean()) if (label == 0).any() else np.nan
         confounding_hint = _facet_concentration(df, feature_name, facet_col)
+        role_presence = {
+            f"role_{role.lower()}_presence_rate": float(presence[roles == role].mean())
+            for role in _ordered_roles(roles)
+            if (roles == role).any()
+        }
         records.append(
             {
                 "order_id": order_id,
@@ -268,6 +280,7 @@ def make_review_decision_table(
                 f"spearman_{feature_name}_vs_{y_col}": corr,
                 "bad_presence_rate": bad_presence,
                 "good_presence_rate": good_presence,
+                **role_presence,
                 f"{facet_col}_concentration_hint": confounding_hint,
                 "evidence_reason": row.get("evidence_reason"),
             }
@@ -312,17 +325,15 @@ def _title(feature_name: str, evidence_row: pd.Series | None) -> str:
     return f"{feature_name}\n{suffix}"
 
 
-def _scatter_feature_y(ax, feature, numeric_feature, is_numeric, y, label, feature_name, y_col):
-    colors = np.where(label == 1, "#d62728", "#1f77b4")
+def _scatter_feature_y(ax, feature, numeric_feature, is_numeric, y, roles, feature_name, y_col):
     if is_numeric:
-        x = numeric_feature
-        ax.scatter(x[label == 0], y[label == 0], s=20, alpha=0.55, c="#1f77b4", label="Good")
-        ax.scatter(x[label == 1], y[label == 1], s=24, alpha=0.70, c="#d62728", label="Bad")
+        _scatter_by_role(ax, numeric_feature, y, roles)
         ax.set_xlabel(feature_name)
     else:
         codes, uniques = pd.factorize(feature.astype("object").where(feature.notna(), "__MISSING__"))
         jitter = np.random.default_rng(42).normal(0, 0.04, size=len(codes))
-        ax.scatter(codes + jitter, y, s=20, alpha=0.60, c=colors)
+        x = pd.Series(codes + jitter, index=feature.index)
+        _scatter_by_role(ax, x, y, roles)
         tick_count = min(len(uniques), 8)
         ax.set_xticks(range(tick_count))
         ax.set_xticklabels([str(v)[:14] for v in uniques[:tick_count]], rotation=30, ha="right")
@@ -333,23 +344,38 @@ def _scatter_feature_y(ax, feature, numeric_feature, is_numeric, y, label, featu
     ax.grid(alpha=0.25)
 
 
-def _distribution_by_label(ax, feature, numeric_feature, is_numeric, label, feature_name):
+def _distribution_by_role(ax, feature, numeric_feature, is_numeric, roles, feature_name):
     if is_numeric:
-        good = numeric_feature[label == 0].dropna()
-        bad = numeric_feature[label == 1].dropna()
-        ax.boxplot([good, bad], showfliers=False)
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels(["Good", "Bad"])
+        grouped = [(role, numeric_feature[roles == role].dropna()) for role in _ordered_roles(roles)]
+        grouped = [(role, values) for role, values in grouped if not values.empty]
+        if grouped:
+            ax.boxplot([values for _, values in grouped], showfliers=False)
+            ax.set_xticks(range(1, len(grouped) + 1))
+            ax.set_xticklabels([role for role, _ in grouped])
         ax.set_ylabel(feature_name)
-        ax.set_title("Good/Bad distribution")
+        ax.set_title("Role distribution")
     else:
-        frame = pd.DataFrame({"feature": feature.astype("object").where(feature.notna(), "__MISSING__"), "label": label})
-        summary = frame.groupby("feature", observed=True)["label"].agg(["mean", "count"]).sort_values("count", ascending=False).head(12)
-        ax.bar(range(len(summary)), summary["mean"], color="#9467bd")
-        ax.set_xticks(range(len(summary)))
-        ax.set_xticklabels([str(v)[:14] for v in summary.index], rotation=30, ha="right")
-        ax.set_ylabel("Bad rate")
-        ax.set_title("Category bad rate")
+        frame = pd.DataFrame(
+            {
+                "feature": feature.astype("object").where(feature.notna(), "__MISSING__"),
+                "role": roles.astype("object").where(roles.notna(), "Ignored"),
+            }
+        )
+        top_categories = frame["feature"].value_counts(dropna=False).head(12).index
+        counts = pd.crosstab(frame["feature"], frame["role"]).reindex(index=top_categories).fillna(0)
+        bottom = np.zeros(len(counts))
+        for role in _ordered_roles(roles):
+            if role not in counts.columns:
+                continue
+            color, _, alpha = _role_style(role)
+            values = counts[role].to_numpy(dtype=float)
+            ax.bar(range(len(counts)), values, bottom=bottom, color=color, alpha=alpha, label=role)
+            bottom += values
+        ax.set_xticks(range(len(counts)))
+        ax.set_xticklabels([str(v)[:14] for v in counts.index], rotation=30, ha="right")
+        ax.set_ylabel("count")
+        ax.set_title("Category role mix")
+        ax.legend(loc="best")
     ax.grid(alpha=0.25)
 
 
@@ -378,13 +404,15 @@ def _facet_summary(ax, df, feature_name, numeric_feature, is_numeric, label, fac
     ax.grid(alpha=0.25)
 
 
-def _presence_by_label(ax, feature, label, feature_name):
+def _presence_by_role(ax, feature, roles, feature_name):
     presence = feature.notna().astype(float)
-    values = [
-        float(presence[label == 0].mean()) if (label == 0).any() else np.nan,
-        float(presence[label == 1].mean()) if (label == 1).any() else np.nan,
-    ]
-    ax.bar(["Good", "Bad"], values, color=["#1f77b4", "#d62728"], alpha=0.75)
+    ordered_roles = _ordered_roles(roles)
+    values = [float(presence[roles == role].mean()) if (roles == role).any() else np.nan for role in ordered_roles]
+    colors = [_role_style(role)[0] for role in ordered_roles]
+    alphas = [_role_style(role)[2] for role in ordered_roles]
+    bars = ax.bar(ordered_roles, values, color=colors)
+    for bar, alpha in zip(bars, alphas):
+        bar.set_alpha(alpha)
     ax.set_ylim(0, 1.05)
     ax.set_ylabel("non-null rate")
     ax.set_title("Presence / missingness")
@@ -394,9 +422,9 @@ def _presence_by_label(ax, feature, label, feature_name):
             ax.text(idx, min(value + 0.03, 1.02), f"{value:.1%}", ha="center")
 
 
-def _review_roles(df: pd.DataFrame, label_col: str, role_col: str) -> pd.Series:
-    if role_col in df.columns:
-        return df[role_col].astype("object").where(df[role_col].notna(), "Ignored")
+def _review_roles(df: pd.DataFrame, label_col: str, role_col: str | None) -> pd.Series:
+    if role_col and role_col in df.columns:
+        return df[role_col].astype("object").where(df[role_col].notna(), "Ignored").astype(str)
     if label_col in df.columns:
         label = pd.to_numeric(df[label_col], errors="coerce").fillna(0).astype(int)
         return pd.Series(np.where(label == 1, "Bad", "Good"), index=df.index)
@@ -404,14 +432,9 @@ def _review_roles(df: pd.DataFrame, label_col: str, role_col: str) -> pd.Series:
 
 
 def _scatter_by_role(ax, x: pd.Series, y: pd.Series, roles: pd.Series) -> None:
-    styles = [
-        ("Ignored", "#9e9e9e", 14, 0.25),
-        ("Good", "#1f77b4", 20, 0.65),
-        ("Bad", "#d62728", 24, 0.75),
-        ("All", "#4c4c4c", 18, 0.55),
-    ]
     plotted = set()
-    for role, color, size, alpha in styles:
+    for role in _ordered_roles(roles):
+        color, size, alpha = _role_style(role)
         mask = roles == role
         if mask.any():
             ax.scatter(x[mask], y[mask], s=size, alpha=alpha, c=color, label=role)
@@ -419,6 +442,24 @@ def _scatter_by_role(ax, x: pd.Series, y: pd.Series, roles: pd.Series) -> None:
     for role in sorted(set(roles.dropna()) - plotted):
         mask = roles == role
         ax.scatter(x[mask], y[mask], s=18, alpha=0.45, label=str(role))
+
+
+def _ordered_roles(roles: pd.Series) -> list[str]:
+    present = {str(role) for role in roles.dropna().unique()}
+    preferred = ["Ignored", "Good", "Bad", "All"]
+    ordered = [role for role in preferred if role in present]
+    ordered.extend(sorted(present - set(ordered)))
+    return ordered
+
+
+def _role_style(role: object) -> tuple[str, int, float]:
+    styles = {
+        "Ignored": ("#9e9e9e", 14, 0.25),
+        "Good": ("#1f77b4", 20, 0.65),
+        "Bad": ("#d62728", 24, 0.78),
+        "All": ("#4c4c4c", 18, 0.55),
+    }
+    return styles.get(str(role), ("#9467bd", 18, 0.50))
 
 
 def _facet_concentration(df: pd.DataFrame, feature_name: str, facet_col: str) -> float:
