@@ -21,6 +21,7 @@ from generate_wide_toy_semiconductor_dataset import (  # noqa: E402
     DEFAULT_BOOSTER_GOOD_ROWS,
     DEFAULT_FULL_ROWS_PER_ORDER,
     DEFAULT_OUTPUT_DIR,
+    DATASET_VERSION,
     generate_dataset,
 )
 
@@ -107,7 +108,8 @@ def parse_args() -> argparse.Namespace:
 
 def ensure_dataset(args: argparse.Namespace) -> None:
     missing = [order_id for order_id in args.orders if not (args.data_dir / f"wide_order_{order_id:03d}.csv").exists()]
-    if args.regenerate or missing or not _existing_dataset_matches(args):
+    needs_regenerate = args.regenerate or bool(missing) or not _existing_dataset_matches(args)
+    if needs_regenerate:
         max_order = max(args.orders)
         summary = generate_dataset(
             output_dir=args.data_dir,
@@ -116,7 +118,7 @@ def ensure_dataset(args: argparse.Namespace) -> None:
             features_per_order=args.features_per_order,
             booster_good_rows=args.booster_good_rows,
             booster_bad_rows=args.booster_bad_rows,
-            overwrite=args.regenerate,
+            overwrite=True,
         )
         print("Generated wide toy dataset:")
         print(summary.to_string(index=False))
@@ -138,6 +140,7 @@ def _existing_dataset_matches(args: argparse.Namespace) -> bool:
         "candidate_feature_count",
         "booster_good_count",
         "booster_bad_count",
+        "dataset_version",
     }
     if not required_cols.issubset(summary.columns):
         return False
@@ -147,6 +150,8 @@ def _existing_dataset_matches(args: argparse.Namespace) -> bool:
         if row.empty:
             return False
         values = row.iloc[0]
+        if str(values["dataset_version"]) != DATASET_VERSION:
+            return False
         if int(values["full_rows"]) != int(args.rows):
             return False
         if int(values["candidate_feature_count"]) != int(args.features_per_order):

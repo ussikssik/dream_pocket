@@ -10,9 +10,16 @@ from .config import (
     RedundancyConfig,
     StatisticalConfig,
 )
+from .alternative_selectors import (
+    AlternativeFeatureSelector,
+    AlternativeSelectorConfig,
+    summarize_method_overlap,
+)
 from .order_runner import DefectAFeatureEvidenceBooster
 
 __all__ = [
+    "AlternativeFeatureSelector",
+    "AlternativeSelectorConfig",
     "AsymmetricSignalConfig",
     "BoosterConfig",
     "CatBoostProbeConfig",
@@ -22,4 +29,5 @@ __all__ = [
     "RankingConfig",
     "RedundancyConfig",
     "StatisticalConfig",
+    "summarize_method_overlap",
 ]

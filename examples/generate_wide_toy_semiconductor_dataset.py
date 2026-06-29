@@ -15,6 +15,7 @@ DEFAULT_FULL_ROWS_PER_ORDER = 2500
 DEFAULT_BOOSTER_GOOD_ROWS = 180
 DEFAULT_BOOSTER_BAD_ROWS = 70
 DEFAULT_FEATURES_PER_ORDER = 10000
+DATASET_VERSION = "wide_toyset_v3_nonlinear"
 
 
 def sigmoid(x: np.ndarray) -> np.ndarray:
@@ -310,6 +311,10 @@ def build_feature_names(features_per_order: int) -> list[str]:
     planted += [f"measure_a_cd_uniformity_like_{i:03d}" for i in range(40)]
     planted += [f"midproc_a_residue_count_like_{i:03d}" for i in range(40)]
     planted += [f"midproc_a_microbridge_count_like_{i:03d}" for i in range(40)]
+    planted += [f"nonlinear_a_elbow_y_like_{i:03d}" for i in range(40)]
+    planted += [f"nonlinear_a_saturation_like_{i:03d}" for i in range(40)]
+    planted += [f"nonlinear_a_u_shape_like_{i:03d}" for i in range(40)]
+    planted += [f"interaction_a_pressure_time_like_{i:03d}" for i in range(40)]
     planted += [f"bad_only_a_sparse_signature_{i:03d}" for i in range(20)]
     planted += [f"good_only_stable_signature_{i:03d}" for i in range(20)]
     planted += [f"defect_b_overlay_like_{i:03d}" for i in range(40)]
@@ -375,6 +380,12 @@ def _plant_signal_blocks(
     a_sensor_signal = 0.72 * a_excursion + 0.22 * sim_a + 0.18 * etch_risky + 0.12 * chamber_risky
     a_measure_signal = 0.45 * a_excursion + 0.36 * sim_a + 1.45 * eds_bin_a_wf_mean
     a_count_lam = 0.18 + 1.65 * a_excursion + 1.15 * sim_a + 0.25 * rework_route
+    elbow_driver = rng.normal(0, 0.75, size=features.shape[0]) + 2.2 * a_excursion + 0.45 * sim_a
+    elbow_signal = np.maximum(elbow_driver - 1.10, 0.0) ** 1.35
+    saturation_signal = np.log1p(5.5 * a_excursion + 1.4 * sim_a)
+    u_shape_sign = rng.choice([-1.0, 1.0], size=features.shape[0])
+    u_shape_signal = u_shape_sign * (0.35 + 1.9 * a_excursion + 0.70 * sim_a) + rng.normal(0, 0.18, size=features.shape[0])
+    interaction_signal = (0.65 * a_excursion + 0.35 * sim_a) * (0.75 + 0.55 * rework_route + 0.30 * etch_risky)
 
     fill_sensor_spike("sensor_a_pressure_like_", a_excursion, sim_a, strength=0.65, base=49.5)
     fill_sensor_spike("sensor_a_rf_power_like_", np.clip(0.75 * a_excursion + 0.25 * rework_route, 0, 1), sim_a, strength=0.55, base=31.0)
@@ -383,6 +394,10 @@ def _plant_signal_blocks(
     fill_continuous("measure_a_cd_uniformity_like_", a_measure_signal + 0.08 * chamber_risky, 0.85, 0.50)
     fill_count("midproc_a_residue_count_like_", a_count_lam, zero_inflation=0.10)
     fill_count("midproc_a_microbridge_count_like_", 0.12 + 1.25 * a_excursion + 0.95 * sim_a, zero_inflation=0.18)
+    fill_continuous("nonlinear_a_elbow_y_like_", elbow_signal, 1.10, 0.42)
+    fill_continuous("nonlinear_a_saturation_like_", saturation_signal, 1.20, 0.48)
+    fill_continuous("nonlinear_a_u_shape_like_", u_shape_signal, 1.00, 0.44)
+    fill_continuous("interaction_a_pressure_time_like_", interaction_signal, 1.25, 0.50)
 
     fill_continuous("defect_b_overlay_like_", 0.65 * b_excursion + 0.55 * sim_b, 1.10, 0.70)
     fill_count("defect_c_particle_like_", 0.15 + 1.40 * c_excursion + 1.20 * sim_c, zero_inflation=0.15)
@@ -461,6 +476,7 @@ def generate_dataset(
             selected.to_csv(path, index=False, encoding="utf-8-sig")
         summaries.append(
             {
+                "dataset_version": DATASET_VERSION,
                 "order_id": order_id,
                 "full_rows": len(full),
                 "booster_rows": len(selected),

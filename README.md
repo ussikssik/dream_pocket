@@ -261,3 +261,41 @@ notebooks/feature_review_dashboard.ipynb
 ```
 
 Visual review dashboard의 main scatter/boxplot은 full pool 파일을 읽어서 `Ignored`, `Good`, `Bad`를 함께 보여줍니다. 별도의 process sequence plot에서는 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지도 확인할 수 있습니다.
+
+## Alternative selector comparison
+
+기존 evidence booster와 다른 방식의 selector를 같은 toyset에서 비교할 수 있습니다.
+
+추가된 방식:
+
+```text
+nonparametric_random  Mann-Whitney/KS/chi-square/presence test 후 p-value <= 0.05 pool에서 weighted random top-k
+distance              Good/Bad 분포 거리 기반 ranking
+catboost_shap_gap     CatBoost SHAP의 Bad 평균과 Good 평균 차이가 큰 feature ranking
+stability_consensus   bootstrap 반복에서 계속 상위권에 남는 feature ranking
+```
+
+빠른 테스트:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 5 --stability-rounds 2
+```
+
+기본 크기 실행:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate
+```
+
+결과 파일:
+
+```text
+outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
+outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
+```
+
+`catboost_shap_gap`을 실제 SHAP 기준으로 쓰려면 CatBoost가 필요합니다.
+
+```powershell
+python -m pip install catboost
+```
