@@ -126,7 +126,13 @@ class DefectAFeatureEvidenceBooster:
         y = as_binary_target(df[config.label_col], config.positive_label)
         group_cols = tuple(col for col in config.group_cols if col in df.columns)
         groups = df[list(group_cols)].copy() if group_cols else None
-        feature_cols = infer_feature_columns(df, config.label_col, group_cols, config.sample_id_cols)
+        feature_cols = infer_feature_columns(
+            df,
+            config.label_col,
+            group_cols,
+            config.sample_id_cols,
+            config.exclude_cols,
+        )
         X = df[feature_cols].copy()
         return X, y, groups
 

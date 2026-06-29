@@ -1,0 +1,15 @@
+﻿feature_name,feature_family,process_area,unit,domain_prior_score
+equipment_name,equipment,process metadata,,0.55
+chamber_id,equipment,process metadata,,0.45
+process_step,process,process metadata,,0.35
+route_id,process,process metadata,,0.25
+process_time_sec,process,process metadata,sec,0.55
+sensor_pressure_chamber_mean,sensor,etch,Torr,0.75
+sensor_rf_power_mean,sensor,etch,W,0.7
+sensor_plasma_instability_score,sensor,etch,score,0.85
+sensor_endpoint_time_sec,sensor,etch,sec,0.65
+measure_cd_post_etch_mean_nm,measure,post etch metrology,nm,0.8
+measure_cd_post_etch_std_nm,measure,post etch metrology,nm,0.75
+midproc_defect_residue_count,midproc defect count,inline inspection,count,0.9
+midproc_defect_microbridge_count,midproc defect count,inline inspection,count,0.8
+bad_only_residue_signature,asymmetric sparse,inline inspection,score,0.6

@@ -26,6 +26,7 @@ config = BoosterConfig(
     positive_label=1,
     group_cols=("lot_id", "tool_id"),
     sample_id_cols=("wafer_id",),
+    exclude_cols=("eds_bin_no_wf_mean", "eds_yield_wf_mean"),
 )
 
 booster = DefectAFeatureEvidenceBooster(load_order, config)
@@ -84,3 +85,245 @@ config = BoosterConfig(
 ```powershell
 python examples/run_feature_booster_example.py
 ```
+
+## Toy semiconductor dataset
+
+실제 실행 테스트용 toy dataset은 아래 명령으로 생성합니다.
+
+```powershell
+python examples/generate_toy_semiconductor_dataset.py
+```
+
+생성 위치:
+
+```text
+data/toy_semiconductor/
+  order_001.csv
+  order_002.csv
+  order_003.csv
+  order_004.csv
+  order_005.csv
+  toy_semiconductor_all_orders.csv
+  feature_metadata.csv
+  target_summary_by_order.csv
+```
+
+포함된 컬럼 예시는 다음과 같습니다.
+
+```text
+sensor_*                  공정 sensor 값
+measure_*                 계측 measure 값
+midproc_defect_*_count    최종 불량이 아닌 중간공정 defect count
+equipment_name            설비명
+chamber_id                chamber
+process_step              공정 step
+process_time_sec          공정 시간
+eds_*                     최종 EDS 기반 y/검증 지표
+target_bad_a              booster가 사용하는 binary label
+```
+
+`eds_*`와 `sim_*` 컬럼은 결과/검증용 컬럼이라 booster feature에서 제외합니다.
+
+Toy dataset으로 booster를 실행하려면:
+
+```powershell
+python examples/run_feature_booster_on_toyset.py
+```
+
+결과 CSV는 아래 폴더에 저장됩니다.
+
+```text
+outputs/toy_semiconductor_booster/
+```
+
+## Wide toyset, 10,000+ features per order
+
+좀 더 실제 상황에 가깝게 order별 1만 개 이상의 candidate feature를 만들고 싶으면 wide toyset을 사용합니다.
+
+기본값은 다음과 같습니다.
+
+```text
+orders: 3
+rows per order: 240
+generated candidate features per order: 10,000
+```
+
+생성:
+
+```powershell
+python examples/generate_wide_toy_semiconductor_dataset.py
+```
+
+실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py
+```
+
+생성 데이터 위치:
+
+```text
+data/toy_semiconductor_wide/
+```
+
+결과 위치:
+
+```text
+outputs/wide_toy_semiconductor_booster/
+```
+
+PC가 느리면 feature 수를 줄여 먼저 테스트할 수 있습니다.
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 --rows 120 --features-per-order 1000
+```
+
+다시 1만 feature로 돌리려면:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 3 --rows 240 --features-per-order 10000
+```
+
+CatBoost SHAP probe까지 켜려면 `catboost`를 설치한 뒤 `--catboost` 옵션을 붙입니다.
+
+```powershell
+python -m pip install catboost
+python examples/run_feature_booster_on_wide_toyset.py --catboost
+```
+
+VS Code에서 노트북으로 보고 싶으면 아래 파일을 엽니다.
+
+```text
+notebooks/feature_booster_wide_toyset.ipynb
+```
+
+## Visual review dashboard
+
+랭킹 결과가 진짜 좋은지 확인하려면 feature별 plot을 봐야 합니다.
+
+아래 노트북을 열면 top feature별로 scatter, Good/Bad boxplot, 설비별 분포, missingness plot을 확인할 수 있습니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+plot에 필요한 패키지:
+
+```powershell
+python -m pip install matplotlib
+```
+
+기본 설정은 wide toyset 결과를 봅니다.
+
+```text
+DATA_DIR = data/toy_semiconductor_wide
+RESULT_PATH = outputs/wide_toy_semiconductor_booster/combined_feature_evidence.csv
+Y_COL = eds_bin_a_wf_mean
+FACET_COL = equipment_name
+```
+
+## Realistic wide toyset update
+
+Wide toyset은 이제 order별 전체 wafer pool을 먼저 만든 뒤, 그 안에서 booster용 Good/Bad 샘플만 발췌합니다.
+
+기본값:
+
+```text
+full wafer rows per order: 2,500
+booster Good rows per order: 180
+booster Bad rows per order: 70
+candidate features per order: 10,000
+```
+
+생성되는 파일:
+
+```text
+data/toy_semiconductor_wide/wide_order_001_full_pool.csv  # 전체 wafer pool
+data/toy_semiconductor_wide/wide_order_001.csv            # booster 입력용 Good/Bad slice
+```
+
+기본 실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate
+```
+
+빠른 테스트:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000
+```
+
+시각 검증은 아래 노트북에서 합니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+Visual review dashboard의 main scatter/boxplot은 full pool 파일을 읽어서 `Ignored`, `Good`, `Bad`를 함께 보여줍니다. 별도의 process sequence plot에서는 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지도 확인할 수 있습니다.
+
+## Alternative selector comparison
+
+기존 evidence booster와 다른 방식의 selector를 같은 toyset에서 비교할 수 있습니다.
+
+추가된 방식:
+
+```text
+nonparametric_random  Mann-Whitney/KS/chi-square/presence test 후 p-value <= 0.05 pool에서 weighted random top-k
+distance              Good/Bad 분포 거리 기반 ranking
+catboost_shap_gap     CatBoost SHAP의 Bad 평균과 Good 평균 차이가 큰 feature ranking
+stability_consensus   bootstrap 반복에서 계속 상위권에 남는 feature ranking
+```
+
+이 스크립트는 selector별로 order당 `--top-k`개 feature를 먼저 고른 뒤, 모든 order의 선택 결과를 method별로 합칩니다. 그 다음 모든 order의 Good/Bad rows를 합쳐 method별 global CatBoost를 한 번씩 학습하고, `abs(mean SHAP Bad - mean SHAP Good)` 기준 top feature를 산출합니다. 기본값은 order/method당 15개 선발, global SHAP delta top 15개 리포트입니다.
+
+빠른 테스트:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 15 --shap-top-n 15 --stability-rounds 2
+```
+
+기본 크기 실행:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate
+```
+
+VS Code/Jupyter에서 표와 plot을 보면서 실행하려면 아래 노트북을 여세요.
+
+```text
+notebooks/selector_catboost_shap_review.ipynb
+```
+
+결과 파일:
+
+```text
+outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
+outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
+outputs/wide_toy_selector_comparison/selector_comparison_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_top_features.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_model_metrics_by_method.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_method_scoreboard.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/plots/
+```
+
+Toyset은 synthetic planted feature를 알고 있으므로, `*_toy_truth_summary.csv`에서 method별 정답 대용 평가를 볼 수 있습니다.
+
+```text
+target_defect_a_precision   선택 feature 중 실제 심어둔 A 관련 feature 비율
+nonlinear_a_hit_count       nonlinear/interaction A feature를 잡은 개수
+sparse_a_hit_count          one-sided sparse A feature를 잡은 개수
+other_defect_hit_count      B/C/D 등 다른 불량 feature를 잡은 개수
+tool_confounded_hit_count   tool confounding feature를 잡은 개수
+noise_hit_count             noise feature를 잡은 개수
+toy_truth_score             A hit reward - non-A/noise/confound penalty 요약 점수
+```
+
+`catboost_shap_gap`을 실제 SHAP 기준으로 쓰려면 CatBoost가 필요합니다.
+
+```powershell
+python -m pip install catboost
+```
+
+CatBoost가 설치되어 있지 않으면 post-evaluation은 CSV에 `catboost_not_installed` 경고를 남기고 종료합니다. Plot은 `matplotlib`이 필요합니다.

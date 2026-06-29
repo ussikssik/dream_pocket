@@ -102,6 +102,7 @@ class BoosterConfig:
     positive_label: Any = 1
     group_cols: tuple[str, ...] = ()
     sample_id_cols: tuple[str, ...] = ()
+    exclude_cols: tuple[str, ...] = ()
     feature_metadata: dict[str, dict[str, Any]] = field(default_factory=dict)
     output_dir: Path | None = None
     quality: QualityConfig = field(default_factory=QualityConfig)
