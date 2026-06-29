@@ -196,3 +196,28 @@ VS Code에서 노트북으로 보고 싶으면 아래 파일을 엽니다.
 ```text
 notebooks/feature_booster_wide_toyset.ipynb
 ```
+
+## Visual review dashboard
+
+랭킹 결과가 진짜 좋은지 확인하려면 feature별 plot을 봐야 합니다.
+
+아래 노트북을 열면 top feature별로 scatter, Good/Bad boxplot, 설비별 분포, missingness plot을 확인할 수 있습니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+plot에 필요한 패키지:
+
+```powershell
+python -m pip install matplotlib
+```
+
+기본 설정은 wide toyset 결과를 봅니다.
+
+```text
+DATA_DIR = data/toy_semiconductor_wide
+RESULT_PATH = outputs/wide_toy_semiconductor_booster/combined_feature_evidence.csv
+Y_COL = eds_bin_a_wf_mean
+FACET_COL = equipment_name
+```
