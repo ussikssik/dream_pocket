@@ -5564,20 +5564,6 @@ if BLOCK_EXPERIMENT_ENABLED:
         block_ranking["selected_block"] = block_ranking["block_id"].astype(str).isin(selected_block_ids)
         write_csv(block_ranking, BLOCK_EXPERIMENT_DIR / f"{defect_id}_block_ranking.csv")
         block_ranking_frames.append(block_ranking)
-        display(block_ranking.head(20))
-
-        block_plot_frame = block_ranking.copy()
-        block_plot_frame["feature_name"] = block_plot_frame["block_id"].astype(str)
-        fig = plot_candidate_loss_ranking(
-            block_plot_frame,
-            output_path=BLOCK_EXPERIMENT_DIR / f"{defect_id}_block_ranking.png",
-            global_metric_col="valid_global_rmse_after_over_baseline",
-            bad_metric_col="valid_bad_rmse_after_over_baseline",
-            selected_col="selected_block",
-            title_prefix=f"{defect_id} block ranking",
-        )
-        if fig is not None:
-            display(fig)
 
         if selected_blocks.empty:
             print(f"[{defect_id} block experiment] selected no block")
@@ -5608,18 +5594,6 @@ if BLOCK_EXPERIMENT_ENABLED:
         feature_ranking["selected"] = feature_ranking["feature_name"].astype(str).isin(selected_feature_names)
         write_csv(feature_ranking, BLOCK_EXPERIMENT_DIR / f"{defect_id}_selected_block_feature_ranking.csv")
         block_feature_ranking_frames.append(feature_ranking)
-        display(feature_ranking)
-
-        fig = plot_candidate_loss_ranking(
-            feature_ranking,
-            output_path=BLOCK_EXPERIMENT_DIR / f"{defect_id}_selected_block_feature_ranking.png",
-            global_metric_col="valid_global_rmse_after_over_baseline",
-            bad_metric_col="valid_bad_rmse_after_over_baseline",
-            answer_features=answer_rules,
-            title_prefix=f"{defect_id} features inside {selected_block_id}",
-        )
-        if fig is not None:
-            display(fig)
 
         if not selected_feature_rows.empty:
             selected_feature_rows = selected_feature_rows.copy()
@@ -5627,7 +5601,6 @@ if BLOCK_EXPERIMENT_ENABLED:
             selected_feature_rows["block_id"] = selected_block_id
             selected_feature_rows["selection_mode"] = BLOCK_FINAL_SELECTION_MODE
             block_selected_feature_frames.append(selected_feature_rows)
-            display(selected_feature_rows)
         else:
             print(f"[{defect_id} block experiment] selected no feature inside {selected_block_id}")
 
@@ -5641,7 +5614,6 @@ if BLOCK_EXPERIMENT_ENABLED:
     write_csv(block_feature_rankings, BLOCK_EXPERIMENT_DIR / "selected_block_feature_rankings.csv")
     write_csv(block_selected_features, BLOCK_EXPERIMENT_DIR / "block_experiment_selected_features.csv")
 
-    display(block_selected_features)
     print("block experiment saved to:", BLOCK_EXPERIMENT_DIR)
 
     def _selected_feature_list(frame, *, defect_id, feature_col="feature_name"):
@@ -5669,7 +5641,6 @@ if BLOCK_EXPERIMENT_ENABLED:
         )
     experiment_selected_feature_comparison = pd.DataFrame(feature_comparison_rows)
     write_csv(experiment_selected_feature_comparison, BLOCK_EXPERIMENT_DIR / "experiment_selected_feature_comparison.csv")
-    display(experiment_selected_feature_comparison)
 
     def _last_standard_row(defect_id):
         if "selected_features" not in globals() or selected_features.empty:
@@ -5746,7 +5717,6 @@ if BLOCK_EXPERIMENT_ENABLED:
             )
     experiment_residual_comparison = pd.DataFrame(residual_comparison_rows)
     write_csv(experiment_residual_comparison, BLOCK_EXPERIMENT_DIR / "experiment_residual_comparison.csv")
-    display(experiment_residual_comparison)
 
     block_elapsed_seconds = time.perf_counter() - block_experiment_start_time
     standard_elapsed_value = globals().get("standard_elapsed_seconds", np.nan)
@@ -5775,4 +5745,7 @@ if BLOCK_EXPERIMENT_ENABLED:
         ]
     )
     write_csv(experiment_runtime_comparison, BLOCK_EXPERIMENT_DIR / "experiment_runtime_comparison.csv")
+
     display(experiment_runtime_comparison)
+    display(experiment_selected_feature_comparison)
+    display(experiment_residual_comparison)
