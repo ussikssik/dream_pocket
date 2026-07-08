@@ -122,6 +122,8 @@ def run_experiment(config_path: Path) -> int:
             min_improvement=config.boosting.min_improvement,
             use_test_for_selection=config.boosting.use_test_for_selection,
             min_valid_bad_samples=config.boosting.min_valid_bad_samples,
+            show_progress=config.boosting.show_progress,
+            progress_every=config.boosting.progress_every,
         )
     )
 

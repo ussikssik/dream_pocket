@@ -22,6 +22,7 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy"},
                 n_rounds=1,
                 min_improvement=0.0,
+                show_progress=False,
             )
         )
         result = booster.run_for_defect(
@@ -53,6 +54,7 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy"},
                 n_rounds=1,
                 min_improvement=0.0,
+                show_progress=False,
             )
         )
         result = booster.run_for_defect(

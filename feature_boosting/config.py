@@ -43,6 +43,8 @@ class BoostingConfig:
     min_improvement: float = 0.0
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
+    show_progress: bool = True
+    progress_every: int = 100
 
 
 @dataclass(frozen=True)

@@ -10,6 +10,14 @@ import pandas as pd
 from .metrics import mae, residual_reduction_metrics, rmse
 from .modeling import fit_regressor, predict_regressor
 
+try:
+    from tqdm.auto import tqdm
+
+    _HAS_TQDM = True
+except Exception:
+    tqdm = None
+    _HAS_TQDM = False
+
 
 @dataclass(frozen=True)
 class ResidualFeatureBoosterConfig:
@@ -20,6 +28,8 @@ class ResidualFeatureBoosterConfig:
     min_improvement: float = 0.0
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
+    show_progress: bool = True
+    progress_every: int = 100
 
 
 @dataclass
@@ -87,28 +97,40 @@ class ResidualFeatureBooster:
             if not _finite(current_pred_train, current_pred_valid, current_pred_test):
                 break
 
-            payloads = [
-                self._score_candidate(
-                    feature,
-                    train_df=train_df,
-                    valid_df=valid_df,
-                    test_df=test_df,
-                    target_col=target_col,
-                    id_col=id_col,
-                    y_train=y_train,
-                    y_valid=y_valid,
-                    y_test=y_test,
-                    current_pred_train=current_pred_train,
-                    current_pred_valid=current_pred_valid,
-                    current_pred_test=current_pred_test,
-                    bad_sample_ids=bad_sample_ids,
-                    good_sample_ids=good_sample_ids,
-                    defect_id=defect_id,
-                    round_idx=round_idx,
-                    quality=quality_lookup.get(feature),
+            payloads = []
+            total_candidates = len(remaining)
+            iterator = _progress_iterator(
+                remaining,
+                enabled=self.config.show_progress,
+                desc=f"{defect_id} round {round_idx}",
+            )
+            for count, feature in enumerate(iterator, start=1):
+                payloads.append(
+                    self._score_candidate(
+                        feature,
+                        train_df=train_df,
+                        valid_df=valid_df,
+                        test_df=test_df,
+                        target_col=target_col,
+                        id_col=id_col,
+                        y_train=y_train,
+                        y_valid=y_valid,
+                        y_test=y_test,
+                        current_pred_train=current_pred_train,
+                        current_pred_valid=current_pred_valid,
+                        current_pred_test=current_pred_test,
+                        bad_sample_ids=bad_sample_ids,
+                        good_sample_ids=good_sample_ids,
+                        defect_id=defect_id,
+                        round_idx=round_idx,
+                        quality=quality_lookup.get(feature),
+                    )
                 )
-                for feature in remaining
-            ]
+                if self.config.show_progress and not _HAS_TQDM:
+                    every = max(1, int(self.config.progress_every))
+                    if count == 1 or count == total_candidates or count % every == 0:
+                        pct = 100.0 * count / max(total_candidates, 1)
+                        print(f"[BOOST {defect_id} round {round_idx}] {count}/{total_candidates} candidates scored ({pct:.1f}%)")
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
                 break
@@ -405,3 +427,9 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "test_global_rmse_reduction",
     ]
     return {key: row.get(key, np.nan) for key in keys}
+
+
+def _progress_iterator(values: list[str], *, enabled: bool, desc: str):
+    if enabled and _HAS_TQDM:
+        return tqdm(values, desc=desc, unit="feature")
+    return values
