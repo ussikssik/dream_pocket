@@ -4460,6 +4460,7 @@ VS Code/Jupyter에서 위에서 아래로 실행하는 노트북입니다.
 from pathlib import Path
 import os
 import sys
+import time
 
 import numpy as np
 import pandas as pd
@@ -4967,6 +4968,8 @@ display(baseline_summary.head(12))
 **출력**: `quality_summary`, `selected_features`, `residual_curve`, `round_mean_residual`, `rankings/*.csv`, `plots/*candidate_loss.png`, `plots/round_mean_abs_residual_points.png`
 
 --- CELL 13 [code] ---
+standard_experiment_start_time = time.perf_counter()
+
 booster = ResidualFeatureBooster(
     ResidualFeatureBoosterConfig(
         residual_model_params=RESIDUAL_MODEL_PARAMS,
@@ -5106,6 +5109,22 @@ if fig is not None:
 
 display(selected_features)
 display(residual_curve)
+
+standard_elapsed_seconds = time.perf_counter() - standard_experiment_start_time
+standard_runtime_summary = pd.DataFrame(
+    [
+        {
+            "method": "standard_feature_by_feature",
+            "elapsed_seconds": standard_elapsed_seconds,
+            "elapsed_minutes": standard_elapsed_seconds / 60.0,
+            "n_candidate_features": len(candidate_cols),
+            "n_selected_features": len(selected_features),
+            "n_defects": len(DEFECTS),
+        }
+    ]
+)
+write_csv(standard_runtime_summary, OUT_DIR / "standard_runtime_summary.csv")
+display(standard_runtime_summary)
 
 --- CELL 14 [markdown] ---
 ## 7. Final model: Xb + selected Xnew 재학습
@@ -5485,6 +5504,7 @@ def _select_from_ranked_frame(frame, *, metric_col, mode, top_k, threshold, high
 
 --- CELL 23 [code] ---
 if BLOCK_EXPERIMENT_ENABLED:
+    block_experiment_start_time = time.perf_counter()
     block_quality_frames = []
     block_ranking_frames = []
     block_feature_ranking_frames = []
@@ -5622,3 +5642,136 @@ if BLOCK_EXPERIMENT_ENABLED:
 
     display(block_selected_features)
     print("block experiment saved to:", BLOCK_EXPERIMENT_DIR)
+
+    def _selected_feature_list(frame, *, defect_id, feature_col="feature_name"):
+        if frame is None or frame.empty or feature_col not in frame.columns or "defect_id" not in frame.columns:
+            return []
+        values = frame.loc[frame["defect_id"].astype(str) == str(defect_id), feature_col].dropna().astype(str).tolist()
+        return list(dict.fromkeys(values))
+
+    feature_comparison_rows = []
+    for defect in DEFECTS:
+        defect_id = defect["defect_id"]
+        standard_features = _selected_feature_list(selected_features, defect_id=defect_id) if "selected_features" in globals() else []
+        block_features = _selected_feature_list(block_selected_features, defect_id=defect_id)
+        overlap = sorted(set(standard_features) & set(block_features))
+        feature_comparison_rows.append(
+            {
+                "defect_id": defect_id,
+                "standard_selected_features": ", ".join(standard_features),
+                "block_selected_features": ", ".join(block_features),
+                "overlap_features": ", ".join(overlap),
+                "n_standard_selected": len(standard_features),
+                "n_block_selected": len(block_features),
+                "n_overlap": len(overlap),
+            }
+        )
+    experiment_selected_feature_comparison = pd.DataFrame(feature_comparison_rows)
+    write_csv(experiment_selected_feature_comparison, BLOCK_EXPERIMENT_DIR / "experiment_selected_feature_comparison.csv")
+    display(experiment_selected_feature_comparison)
+
+    def _last_standard_row(defect_id):
+        if "selected_features" not in globals() or selected_features.empty:
+            return None
+        work = selected_features[selected_features["defect_id"].astype(str) == str(defect_id)].copy()
+        if work.empty:
+            return None
+        work["round"] = pd.to_numeric(work["round"], errors="coerce")
+        return work.sort_values("round").iloc[-1]
+
+    residual_comparison_rows = []
+    block_final_feature_sets_scored = 0
+    for defect in DEFECTS:
+        defect_id = defect["defect_id"]
+        standard_row = _last_standard_row(defect_id)
+        standard_features = _selected_feature_list(selected_features, defect_id=defect_id) if "selected_features" in globals() else []
+        if standard_row is not None:
+            residual_comparison_rows.append(
+                {
+                    "defect_id": defect_id,
+                    "method": "standard_feature_by_feature",
+                    "metric_source": "last cumulative selected round",
+                    "selected_features": ", ".join(standard_features),
+                    "valid_bad_rmse_after": standard_row.get("valid_bad_rmse_after", np.nan),
+                    "valid_bad_rmse_after_over_baseline": standard_row.get("valid_bad_rmse_after_over_baseline", np.nan),
+                    "test_bad_rmse_after": standard_row.get("test_bad_rmse_after", np.nan),
+                    "test_bad_rmse_after_over_baseline": standard_row.get("test_bad_rmse_after_over_baseline", np.nan),
+                    "valid_global_rmse_after": standard_row.get("valid_global_rmse_after", np.nan),
+                    "valid_global_rmse_after_over_baseline": standard_row.get("valid_global_rmse_after_over_baseline", np.nan),
+                }
+            )
+        else:
+            residual_comparison_rows.append(
+                {
+                    "defect_id": defect_id,
+                    "method": "standard_feature_by_feature",
+                    "metric_source": "no selected feature",
+                    "selected_features": "",
+                }
+            )
+
+        block_features = _selected_feature_list(block_selected_features, defect_id=defect_id)
+        if block_features:
+            block_set_row = _score_residual_feature_set(
+                block_features,
+                defect_id=defect_id,
+                groups=defect_groups[defect_id],
+                stage="block_selected_feature_set",
+                feature_set_name="block_selected_features",
+            )
+            block_final_feature_sets_scored += 1
+            residual_comparison_rows.append(
+                {
+                    "defect_id": defect_id,
+                    "method": "block_preselection_then_feature",
+                    "metric_source": "selected feature set refit",
+                    "selected_features": ", ".join(block_features),
+                    "valid_bad_rmse_after": block_set_row.get("valid_bad_rmse_after", np.nan),
+                    "valid_bad_rmse_after_over_baseline": block_set_row.get("valid_bad_rmse_after_over_baseline", np.nan),
+                    "test_bad_rmse_after": block_set_row.get("test_bad_rmse_after", np.nan),
+                    "test_bad_rmse_after_over_baseline": block_set_row.get("test_bad_rmse_after_over_baseline", np.nan),
+                    "valid_global_rmse_after": block_set_row.get("valid_global_rmse_after", np.nan),
+                    "valid_global_rmse_after_over_baseline": block_set_row.get("valid_global_rmse_after_over_baseline", np.nan),
+                }
+            )
+        else:
+            residual_comparison_rows.append(
+                {
+                    "defect_id": defect_id,
+                    "method": "block_preselection_then_feature",
+                    "metric_source": "no selected feature",
+                    "selected_features": "",
+                }
+            )
+    experiment_residual_comparison = pd.DataFrame(residual_comparison_rows)
+    write_csv(experiment_residual_comparison, BLOCK_EXPERIMENT_DIR / "experiment_residual_comparison.csv")
+    display(experiment_residual_comparison)
+
+    block_elapsed_seconds = time.perf_counter() - block_experiment_start_time
+    standard_elapsed_value = globals().get("standard_elapsed_seconds", np.nan)
+    experiment_runtime_comparison = pd.DataFrame(
+        [
+            {
+                "method": "standard_feature_by_feature",
+                "elapsed_seconds": standard_elapsed_value,
+                "elapsed_minutes": standard_elapsed_value / 60.0 if np.isfinite(standard_elapsed_value) else np.nan,
+                "n_candidate_features": len(candidate_cols),
+                "n_selected_features": len(selected_features) if "selected_features" in globals() else np.nan,
+                "stage1_units_scored": np.nan,
+                "stage2_units_scored": np.nan,
+                "final_feature_sets_scored": np.nan,
+            },
+            {
+                "method": "block_preselection_then_feature",
+                "elapsed_seconds": block_elapsed_seconds,
+                "elapsed_minutes": block_elapsed_seconds / 60.0,
+                "n_candidate_features": len(candidate_cols),
+                "n_selected_features": len(block_selected_features),
+                "stage1_units_scored": len(block_rankings),
+                "stage2_units_scored": len(block_feature_rankings),
+                "final_feature_sets_scored": block_final_feature_sets_scored,
+            },
+        ]
+    )
+    write_csv(experiment_runtime_comparison, BLOCK_EXPERIMENT_DIR / "experiment_runtime_comparison.csv")
+    display(experiment_runtime_comparison)
