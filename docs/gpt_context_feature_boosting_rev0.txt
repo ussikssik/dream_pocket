@@ -596,10 +596,8 @@ residual_model:
   thread_count: 1
 
 feature_filter:
-  max_missing_rate: 0.5
+  max_missing_rate: 0.8
   min_unique_values: 2
-  min_bad_coverage: 0.7
-  min_good_coverage: 0.7
 
 boosting:
   n_rounds: 5
@@ -1193,10 +1191,10 @@ class DefectConfig:
 
 @dataclass(frozen=True)
 class FeatureFilterConfig:
-    max_missing_rate: float = 0.5
+    max_missing_rate: float = 0.8
     min_unique_values: int = 2
-    min_bad_coverage: float = 0.7
-    min_good_coverage: float = 0.7
+    min_bad_coverage: float | None = None
+    min_good_coverage: float | None = None
 
 
 @dataclass(frozen=True)
@@ -3563,9 +3561,9 @@ def profile_candidate_features(
             reasons.append("constant_feature")
         if missing_rate > config.max_missing_rate:
             reasons.append("high_missing_rate")
-        if bad_coverage < config.min_bad_coverage:
+        if config.min_bad_coverage is not None and bad_coverage < config.min_bad_coverage:
             reasons.append("low_bad_coverage")
-        if good_coverage < config.min_good_coverage:
+        if config.min_good_coverage is not None and good_coverage < config.min_good_coverage:
             reasons.append("low_good_coverage")
         if train_coverage <= 0 or valid_coverage <= 0 or test_coverage <= 0:
             reasons.append("missing_split_values")
@@ -4406,6 +4404,28 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(bool(summary.loc["hidden_defect_1", "is_pass"]))
         self.assertIn("leakage_like_feature", str(summary.loc["yield_target_like", "fail_reason"]))
 
+    def test_default_filter_only_requires_missing_rate_and_unique_values(self) -> None:
+        df = pd.DataFrame(
+            {
+                "sample_id": ["a", "b", "c", "d", "e", "f"],
+                "split": ["train", "train", "valid", "valid", "test", "test"],
+                "sparse_by_group": [1, 2, 3, None, 5, None],
+            }
+        )
+        summary = profile_candidate_features(
+            df,
+            ["sparse_by_group"],
+            id_col="sample_id",
+            split_col="split",
+            bad_ids={"c", "e"},
+            good_ids={"d", "f"},
+            config=FeatureFilterConfig(),
+        ).set_index("feature_name")
+
+        self.assertTrue(bool(summary.loc["sparse_by_group", "is_pass"]))
+        self.assertNotIn("low_bad_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
+        self.assertNotIn("low_good_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
+
 
 if __name__ == "__main__":
     unittest.main()
@@ -4610,10 +4630,8 @@ RESIDUAL_MODEL_PARAMS = {
 FINAL_MODEL_PARAMS = dict(BASELINE_MODEL_PARAMS)
 
 FEATURE_FILTER = FeatureFilterConfig(
-    max_missing_rate=0.5,
+    max_missing_rate=0.8,
     min_unique_values=2,
-    min_bad_coverage=0.7,
-    min_good_coverage=0.7,
 )
 
 BOOSTING_N_ROUNDS = 5

@@ -29,10 +29,10 @@ class DefectConfig:
 
 @dataclass(frozen=True)
 class FeatureFilterConfig:
-    max_missing_rate: float = 0.5
+    max_missing_rate: float = 0.8
     min_unique_values: int = 2
-    min_bad_coverage: float = 0.7
-    min_good_coverage: float = 0.7
+    min_bad_coverage: float | None = None
+    min_good_coverage: float | None = None
 
 
 @dataclass(frozen=True)

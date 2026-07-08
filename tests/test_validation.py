@@ -60,6 +60,28 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(bool(summary.loc["hidden_defect_1", "is_pass"]))
         self.assertIn("leakage_like_feature", str(summary.loc["yield_target_like", "fail_reason"]))
 
+    def test_default_filter_only_requires_missing_rate_and_unique_values(self) -> None:
+        df = pd.DataFrame(
+            {
+                "sample_id": ["a", "b", "c", "d", "e", "f"],
+                "split": ["train", "train", "valid", "valid", "test", "test"],
+                "sparse_by_group": [1, 2, 3, None, 5, None],
+            }
+        )
+        summary = profile_candidate_features(
+            df,
+            ["sparse_by_group"],
+            id_col="sample_id",
+            split_col="split",
+            bad_ids={"c", "e"},
+            good_ids={"d", "f"},
+            config=FeatureFilterConfig(),
+        ).set_index("feature_name")
+
+        self.assertTrue(bool(summary.loc["sparse_by_group", "is_pass"]))
+        self.assertNotIn("low_bad_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
+        self.assertNotIn("low_good_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -44,10 +44,8 @@ residual_model:
   thread_count: 1
 
 feature_filter:
-  max_missing_rate: 0.5
+  max_missing_rate: 0.8
   min_unique_values: 2
-  min_bad_coverage: 0.7
-  min_good_coverage: 0.7
 
 boosting:
   n_rounds: 5

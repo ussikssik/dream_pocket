@@ -106,9 +106,9 @@ def profile_candidate_features(
             reasons.append("constant_feature")
         if missing_rate > config.max_missing_rate:
             reasons.append("high_missing_rate")
-        if bad_coverage < config.min_bad_coverage:
+        if config.min_bad_coverage is not None and bad_coverage < config.min_bad_coverage:
             reasons.append("low_bad_coverage")
-        if good_coverage < config.min_good_coverage:
+        if config.min_good_coverage is not None and good_coverage < config.min_good_coverage:
             reasons.append("low_good_coverage")
         if train_coverage <= 0 or valid_coverage <= 0 or test_coverage <= 0:
             reasons.append("missing_split_values")
