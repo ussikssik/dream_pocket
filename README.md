@@ -81,9 +81,11 @@ baseline_residual_summary.csv
 candidate_quality_summary.csv
 selected_features.csv
 residual_reduction_curve.csv
+round_mean_residual_summary.csv
 final_model_metrics.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
+plots/round_mean_abs_residual_points.png
 models/baseline_model.cbm
 models/final_model.cbm
 ```

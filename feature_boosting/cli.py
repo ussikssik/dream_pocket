@@ -20,7 +20,9 @@ from .reporting import (
     baseline_residual_summary,
     copy_config,
     plot_residual_curve,
+    plot_round_residual_points,
     prepare_output_dir,
+    round_residual_summary,
     setup_logger,
     write_csv,
 )
@@ -94,16 +96,17 @@ def run_experiment(config_path: Path) -> int:
     train_df, valid_df, test_df = split_frame(all_df, cols.split_col)
     baseline_metrics = metrics_by_split(all_df, target_col=cols.target_col, pred_col="baseline_pred", split_col=cols.split_col)
     write_csv(baseline_metrics, output_dir / "baseline_metrics.csv")
+    baseline_summary = baseline_residual_summary(
+        all_df,
+        target_col=cols.target_col,
+        pred_col="baseline_pred",
+        residual_col="baseline_residual",
+        split_col=cols.split_col,
+        id_col=cols.id_col,
+        defects=defect_groups,
+    )
     write_csv(
-        baseline_residual_summary(
-            all_df,
-            target_col=cols.target_col,
-            pred_col="baseline_pred",
-            residual_col="baseline_residual",
-            split_col=cols.split_col,
-            id_col=cols.id_col,
-            defects=defect_groups,
-        ),
+        baseline_summary,
         output_dir / "baseline_residual_summary.csv",
     )
     valid_rmse = baseline_metrics.loc[baseline_metrics["split"].astype(str) == "valid", "rmse"]
@@ -179,6 +182,9 @@ def run_experiment(config_path: Path) -> int:
     write_csv(selected_features, output_dir / "selected_features.csv")
     write_csv(residual_curve, output_dir / "residual_reduction_curve.csv")
     plot_residual_curve(residual_curve, output_dir)
+    round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+    write_csv(round_mean_residual, output_dir / "round_mean_residual_summary.csv")
+    plot_round_residual_points(round_mean_residual, output_path=output_dir / "plots" / "round_mean_abs_residual_points.png")
 
     selected_cols = _unique_selected_features(selected_features, candidate_cols)
     final_feature_cols = base_feature_cols + selected_cols

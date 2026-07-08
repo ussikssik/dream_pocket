@@ -110,6 +110,105 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
         plt.close(fig)
 
 
+def round_residual_summary(
+    residual_curve: pd.DataFrame,
+    baseline_summary: pd.DataFrame,
+    *,
+    group: str = "bad",
+) -> pd.DataFrame:
+    """Build round-level mean absolute residual points.
+
+    Round 0 comes from the baseline residual summary. Later rounds come from
+    the selected-feature residual curve. The value is MAE, i.e.
+    mean(abs(y - prediction)), which is a stable "average residual" measure.
+    """
+    rows: list[dict[str, object]] = []
+    if baseline_summary is not None and not baseline_summary.empty:
+        base = baseline_summary[baseline_summary["group"].astype(str) == group].copy()
+        base = base[base["defect_id"].astype(str) != "global"]
+        for _, row in base.iterrows():
+            rows.append(
+                {
+                    "defect_id": row["defect_id"],
+                    "round": 0,
+                    "split": row["split"],
+                    "group": group,
+                    "selected_feature": "baseline",
+                    "mean_abs_residual": row.get("mean_abs_residual", np.nan),
+                }
+            )
+
+    if residual_curve is not None and not residual_curve.empty:
+        for _, row in residual_curve.iterrows():
+            for split in ("valid", "test"):
+                col = f"{split}_{group}_mae"
+                if col not in residual_curve.columns:
+                    continue
+                rows.append(
+                    {
+                        "defect_id": row["defect_id"],
+                        "round": int(row["round"]),
+                        "split": split,
+                        "group": group,
+                        "selected_feature": row.get("selected_feature", ""),
+                        "mean_abs_residual": row.get(col, np.nan),
+                    }
+                )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["mean_abs_residual"] = pd.to_numeric(result["mean_abs_residual"], errors="coerce")
+    return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
+
+
+def plot_round_residual_points(
+    summary: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    title: str = "round mean absolute residual",
+):
+    """Plot round 0/1/2/... average residual points by defect."""
+    if summary.empty:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    splits = [split for split in ("valid", "test") if (summary["split"].astype(str) == split).any()]
+    if not splits:
+        splits = sorted(summary["split"].dropna().astype(str).unique())
+    fig, axes = plt.subplots(1, len(splits), figsize=(8 * len(splits), 4.5), squeeze=False)
+    axes = axes[0]
+    for ax, split in zip(axes, splits):
+        work = summary[summary["split"].astype(str) == split].copy()
+        for defect_id, group_df in work.groupby("defect_id", sort=False):
+            group_df = group_df.sort_values("round")
+            ax.plot(group_df["round"], group_df["mean_abs_residual"], marker="o", linewidth=1.7, label=str(defect_id))
+            for _, row in group_df.iterrows():
+                if int(row["round"]) == 0:
+                    continue
+                ax.annotate(
+                    str(row.get("selected_feature", ""))[:24],
+                    (row["round"], row["mean_abs_residual"]),
+                    textcoords="offset points",
+                    xytext=(4, 5),
+                    fontsize=8,
+                    alpha=0.8,
+                )
+        ax.set_title(f"{split} {title}")
+        ax.set_xlabel("round")
+        ax.set_ylabel("mean abs residual (MAE)")
+        ax.grid(alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
 def plot_candidate_loss_ranking(
     ranking_df: pd.DataFrame,
     *,
