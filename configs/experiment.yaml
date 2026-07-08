@@ -1,0 +1,72 @@
+run_id: "yield_residual_boosting_poc_001"
+
+paths:
+  base_dataset: "data/base_dataset.parquet"
+  candidate_features: "data/candidate_features.parquet"
+  base_feature_cols: "data/base_feature_cols.txt"
+  output_dir: "outputs"
+
+columns:
+  id_col: "sample_id"
+  target_col: "yield"
+  split_col: "split"
+
+defects:
+  - defect_id: "defect_1"
+    bad_group_path: "data/groups/defect_1_bad.csv"
+    good_group_path: "data/groups/defect_1_good.csv"
+  - defect_id: "defect_2"
+    bad_group_path: "data/groups/defect_2_bad.csv"
+    good_group_path: "data/groups/defect_2_good.csv"
+  - defect_id: "defect_3"
+    bad_group_path: "data/groups/defect_3_bad.csv"
+    good_group_path: "data/groups/defect_3_good.csv"
+
+baseline_model:
+  iterations: 3000
+  depth: 6
+  learning_rate: 0.03
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 100
+  verbose: 200
+
+residual_model:
+  iterations: 300
+  depth: 3
+  learning_rate: 0.05
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 30
+  verbose: false
+  thread_count: 1
+
+feature_filter:
+  max_missing_rate: 0.5
+  min_unique_values: 2
+  min_bad_coverage: 0.7
+  min_good_coverage: 0.7
+
+boosting:
+  n_rounds: 5
+  select_per_round: 1
+  main_metric: "bad_rmse_reduction"
+  min_improvement: 0.0
+  use_test_for_selection: false
+  min_valid_bad_samples: 1
+
+final_model:
+  iterations: 3000
+  depth: 6
+  learning_rate: 0.03
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 100
+  verbose: 200
+
+shap:
+  enabled: true
+  max_samples: 5000

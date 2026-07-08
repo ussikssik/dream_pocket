@@ -4,6 +4,49 @@
 
 이 모듈은 단순히 Good/Bad 분류 성능을 높이는 feature selector가 아닙니다. 목적은 특정 불량 A와 관련된 원인 후보 feature를 order별로 끌어올리고, XAI/통계/안정성 관점의 evidence를 같이 남기는 것입니다.
 
+## Residual-Based Feature Boosting PoC
+
+`feature_boosting/` 패키지는 CatBoost 수율회귀 baseline이 남긴 residual을 sampled candidate feature가 설명할 수 있는지 검증하는 별도 PoC 파이프라인입니다.
+
+VS Code에서 바로 돌릴 때는 아래 노트북을 여세요. YAML 파일은 CLI 반복 실행용이라 필수는 아닙니다.
+
+```text
+notebooks/residual_feature_boosting_poc.ipynb
+```
+
+입력 파일 기본 형태:
+
+```text
+data/base_dataset.parquet          # sample_id, yield, split(train/valid/test), base features
+data/candidate_features.parquet    # sample_id, sampled candidate features
+data/base_feature_cols.txt         # baseline Xb feature list
+data/groups/defect_1_bad.csv       # sample_id
+data/groups/defect_1_good.csv      # sample_id
+```
+
+VS Code 노트북 대신 CLI로 반복 실행하고 싶을 때:
+
+```powershell
+python scripts/run_experiment.py --config configs/experiment.yaml
+```
+
+주요 산출물은 `outputs/{run_id}/` 아래에 저장됩니다.
+
+```text
+baseline_metrics.csv
+baseline_residual_summary.csv
+candidate_quality_summary.csv
+selected_features.csv
+residual_reduction_curve.csv
+final_model_metrics.csv
+shap_summary.csv
+rankings/{defect_id}_round_{round}.csv
+models/baseline_model.cbm
+models/final_model.cbm
+```
+
+가장 중요한 원칙은 residual boosting 단계에서는 `Xb`를 다시 학습하지 않는 것입니다. 각 round에서는 후보 feature `x_j` 하나만으로 현재 residual을 예측하고, feature 선택은 validation bad group의 `bad_rmse_reduction` 기준으로 수행합니다. Test metric은 기록과 검증에만 사용합니다.
+
 ## 핵심 원칙
 
 - Good 또는 Bad 한쪽에서만 존재하는 feature는 제거하지 않습니다.
