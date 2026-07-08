@@ -456,18 +456,44 @@ def _plot_loss_axis(
     if answer_col in work.columns:
         answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
     answers = work[answer_mask]
+    answer_requested = bool(answer_features)
+    if answer_col in ranking_df.columns:
+        answer_requested = answer_requested or bool(ranking_df[answer_col].fillna(False).astype(bool).any())
     if not answers.empty:
         answer_x = answers.index.to_numpy() + 1
-        ax.scatter(answer_x, answers[metric_col], marker="X", s=95, color="#2a9d8f", label="answer feature", zorder=6)
+        ax.scatter(
+            answer_x,
+            answers[metric_col],
+            marker="X",
+            s=220,
+            color="#2a9d8f",
+            edgecolors="#0b3d35",
+            linewidths=1.4,
+            label="answer feature",
+            zorder=7,
+        )
         for xpos, (_, row) in zip(answer_x, answers.iterrows()):
             ax.annotate(
-                str(row.get("feature_name", ""))[:24],
+                f"ANSWER rank {int(xpos)}\n{str(row.get('feature_name', ''))[:24]}",
                 (xpos, row[metric_col]),
                 textcoords="offset points",
-                xytext=(5, -11),
+                xytext=(7, -18),
                 fontsize=8,
                 color="#2a9d8f",
+                fontweight="bold",
             )
+    elif answer_requested:
+        ax.text(
+            0.02,
+            0.96,
+            "answer feature not found in this plotted ranking\ncheck ANSWER_FEATURES, matched columns, or kernel restart",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#b00020",
+            bbox={"facecolor": "white", "edgecolor": "#b00020", "alpha": 0.88, "boxstyle": "round,pad=0.35"},
+        )
 
     ax.set_title(title)
     ax.set_xlabel("feature rank (ascending loss)")

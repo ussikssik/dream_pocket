@@ -63,7 +63,7 @@ def add_answer_feature_flags(
 
 def _matches_rule(feature_name: str, rule: AnswerRule) -> bool:
     if isinstance(rule, str):
-        return feature_name == rule
+        return feature_name.lower() == rule.lower()
     if not isinstance(rule, dict):
         return False
 

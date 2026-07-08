@@ -734,7 +734,7 @@ def add_answer_feature_flags(
 
 def _matches_rule(feature_name: str, rule: AnswerRule) -> bool:
     if isinstance(rule, str):
-        return feature_name == rule
+        return feature_name.lower() == rule.lower()
     if not isinstance(rule, dict):
         return False
 
@@ -2418,18 +2418,44 @@ def _plot_loss_axis(
     if answer_col in work.columns:
         answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
     answers = work[answer_mask]
+    answer_requested = bool(answer_features)
+    if answer_col in ranking_df.columns:
+        answer_requested = answer_requested or bool(ranking_df[answer_col].fillna(False).astype(bool).any())
     if not answers.empty:
         answer_x = answers.index.to_numpy() + 1
-        ax.scatter(answer_x, answers[metric_col], marker="X", s=95, color="#2a9d8f", label="answer feature", zorder=6)
+        ax.scatter(
+            answer_x,
+            answers[metric_col],
+            marker="X",
+            s=220,
+            color="#2a9d8f",
+            edgecolors="#0b3d35",
+            linewidths=1.4,
+            label="answer feature",
+            zorder=7,
+        )
         for xpos, (_, row) in zip(answer_x, answers.iterrows()):
             ax.annotate(
-                str(row.get("feature_name", ""))[:24],
+                f"ANSWER rank {int(xpos)}\n{str(row.get('feature_name', ''))[:24]}",
                 (xpos, row[metric_col]),
                 textcoords="offset points",
-                xytext=(5, -11),
+                xytext=(7, -18),
                 fontsize=8,
                 color="#2a9d8f",
+                fontweight="bold",
             )
+    elif answer_requested:
+        ax.text(
+            0.02,
+            0.96,
+            "answer feature not found in this plotted ranking\ncheck ANSWER_FEATURES, matched columns, or kernel restart",
+            transform=ax.transAxes,
+            ha="left",
+            va="top",
+            fontsize=8,
+            color="#b00020",
+            bbox={"facecolor": "white", "edgecolor": "#b00020", "alpha": 0.88, "boxstyle": "round,pad=0.35"},
+        )
 
     ax.set_title(title)
     ax.set_xlabel("feature rank (ascending loss)")
@@ -4914,6 +4940,8 @@ for defect in DEFECTS:
         candidate_series = pd.Series(candidate_cols, dtype=str)
         answer_tracking_cols = candidate_series[answer_feature_mask(candidate_series, answer_rules)].tolist()
     print(f"[{defect_id}] answer tracking cols: {answer_tracking_cols}")
+    if answer_rules and not answer_tracking_cols:
+        print(f"[WARN {defect_id}] ANSWER_FEATURES did not match any candidate column. Check names/rules: {answer_rules}")
 
     print(f"[{defect_id}] scoring {len(candidate_cols)} candidates")
     result = booster.run_for_defect(
@@ -4938,6 +4966,19 @@ for defect in DEFECTS:
                 continue
             ranking_df = add_answer_feature_flags(ranking_df, feature_col="feature_name", rules=answer_rules)
             round_no = int(ranking_df["round"].max())
+            answer_mask = ranking_df["is_answer_feature"].fillna(False).astype(bool) if "is_answer_feature" in ranking_df.columns else pd.Series(False, index=ranking_df.index)
+            answer_rows = ranking_df[answer_mask].copy()
+            if answer_rules and answer_rows.empty:
+                print(f"[WARN {defect_id} round {round_no}] no answer feature row in ranking. answer_tracking_cols={answer_tracking_cols}")
+            elif not answer_rows.empty:
+                answer_cols_to_show = [
+                    col for col in [
+                        "defect_id", "round", "rank", "feature_name", "selected", "eligible_for_selection",
+                        "ranking_only", "already_selected", "valid_bad_rmse_after_over_baseline",
+                        "valid_global_rmse_after_over_baseline", "answer_match_rule",
+                    ] if col in answer_rows.columns
+                ]
+                display(answer_rows[answer_cols_to_show])
             write_csv(ranking_df, OUT_DIR / "rankings" / f"{defect_id}_round_{round_no}.csv")
             fig = plot_candidate_loss_ranking(
                 ranking_df,

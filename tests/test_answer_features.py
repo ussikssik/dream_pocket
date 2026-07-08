@@ -19,6 +19,13 @@ class AnswerFeatureTests(unittest.TestCase):
 
         self.assertEqual(mask.tolist(), [True, True, False, False])
 
+    def test_string_rule_is_case_insensitive(self) -> None:
+        names = pd.Series(["Hidden_Defect_2", "hidden_defect_1", "noise"])
+
+        mask = answer_feature_mask(names, ["hidden_defect_2"])
+
+        self.assertEqual(mask.tolist(), [True, False, False])
+
     def test_add_answer_feature_flags_adds_reason(self) -> None:
         frame = pd.DataFrame({"feature_name": ["tool_root_signal", "noise"]})
         result = add_answer_feature_flags(
