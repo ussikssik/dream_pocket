@@ -75,8 +75,9 @@ ANSWER_FEATURES = {
 
 Answer features are forced into every round ranking chart even after they
 were already selected in an earlier round. This is only for visualization;
-already-selected answer features are marked as ranking-only and are not
-eligible for selection again.
+answer features are selected only when they pass the same top-k or threshold
+rule as every other candidate. Already-selected answer features are marked as
+ranking-only and are not eligible for selection again.
 
 ```text
 data/residual_poc_demo/

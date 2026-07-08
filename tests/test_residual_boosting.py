@@ -119,6 +119,42 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertTrue(bool(round_2.loc["hidden", "ranking_only"]))
         self.assertTrue(bool(round_2.loc["hidden", "already_selected"]))
 
+    def test_always_rank_cols_do_not_force_selection(self) -> None:
+        df = _synthetic_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df.loc[df["hidden"] > df["hidden"].median(), "sample_id"])
+        good_ids = set(df.loc[df["hidden"] <= df["hidden"].median(), "sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                select_per_round=1,
+                min_improvement=0.0,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden", "noise_feature"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=good_ids,
+            always_rank_cols=["noise_feature"],
+        )
+
+        ranking = result.rankings[0].set_index("feature_name")
+        self.assertIn("noise_feature", ranking.index)
+        self.assertFalse(bool(ranking.loc["noise_feature", "selected"]))
+        self.assertEqual(result.selected_features["feature_name"].tolist(), ["hidden"])
+
     def test_overfit_guard_rejects_train_only_signal(self) -> None:
         df = _overfit_frame()
         train_df = df[df["split"] == "train"].copy()
