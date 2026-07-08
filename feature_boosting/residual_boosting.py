@@ -96,10 +96,8 @@ class ResidualFeatureBooster:
         current_pred_valid = baseline_pred_valid.copy()
         current_pred_test = baseline_pred_test.copy()
 
-        all_candidates = list(dict.fromkeys(candidate_cols))
-        remaining = all_candidates.copy()
-        always_rank_set = set(always_rank_cols or []) & set(all_candidates)
-        selected_history: set[str] = set()
+        remaining = list(dict.fromkeys(candidate_cols))
+        _ = always_rank_cols
         selected_records: list[dict[str, Any]] = []
         curve_records: list[dict[str, Any]] = []
         rankings: list[pd.DataFrame] = []
@@ -119,7 +117,7 @@ class ResidualFeatureBooster:
                 break
 
             payloads = []
-            ranking_features = list(dict.fromkeys([*remaining, *[feature for feature in all_candidates if feature in always_rank_set]]))
+            ranking_features = remaining.copy()
             remaining_set = set(remaining)
             total_candidates = len(ranking_features)
             iterator = _progress_iterator(
@@ -161,7 +159,7 @@ class ResidualFeatureBooster:
                 feature_name = str(payload.row.get("feature_name", ""))
                 payload.row["eligible_for_selection"] = feature_name in remaining_set
                 payload.row["ranking_only"] = feature_name not in remaining_set
-                payload.row["already_selected"] = feature_name in selected_history
+                payload.row["already_selected"] = feature_name not in remaining_set
                 self._apply_overfit_guard(payload.row)
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
@@ -201,7 +199,6 @@ class ResidualFeatureBooster:
                 current_pred_valid = current_pred_valid + payload.pred_valid
                 current_pred_test = current_pred_test + payload.pred_test
                 selected_records.append(_selected_record(payload.row))
-                selected_history.add(feature)
                 curve_records.append(
                     self._curve_record(
                         defect_id=defect_id,

@@ -80,7 +80,7 @@ class ResidualBoostingTests(unittest.TestCase):
         selected = set(result.selected_features["feature_name"].astype(str))
         self.assertEqual(selected, {"hidden"})
 
-    def test_always_rank_cols_keep_answer_visible_after_selection(self) -> None:
+    def test_always_rank_cols_drop_feature_after_selection(self) -> None:
         df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
         valid_df = df[df["split"] == "valid"].copy()
@@ -114,10 +114,7 @@ class ResidualBoostingTests(unittest.TestCase):
         round_1 = result.rankings[0].set_index("feature_name")
         round_2 = result.rankings[1].set_index("feature_name")
         self.assertTrue(bool(round_1.loc["hidden", "selected"]))
-        self.assertIn("hidden", round_2.index)
-        self.assertFalse(bool(round_2.loc["hidden", "eligible_for_selection"]))
-        self.assertTrue(bool(round_2.loc["hidden", "ranking_only"]))
-        self.assertTrue(bool(round_2.loc["hidden", "already_selected"]))
+        self.assertNotIn("hidden", round_2.index)
 
     def test_always_rank_cols_do_not_force_selection(self) -> None:
         df = _synthetic_frame()
