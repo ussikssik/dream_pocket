@@ -61,6 +61,13 @@ boosting:
   max_select_per_round:
   use_test_for_selection: false
   min_valid_bad_samples: 1
+  overfit_guard_enabled: true
+  overfit_guard_metric_scope: "bad"
+  overfit_guard_min_valid_rmse_reduction: 0.0
+  overfit_guard_max_valid_after_over_baseline: 1.0
+  overfit_guard_max_valid_train_gap: 0.25
+  overfit_guard_use_test: false
+  overfit_guard_max_test_after_over_baseline: 1.05
   show_progress: true
   progress_every: 100
 

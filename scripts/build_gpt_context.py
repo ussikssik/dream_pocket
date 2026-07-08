@@ -20,6 +20,7 @@ TEXT_FILES = [
     "feature_boosting/final_model.py",
     "feature_boosting/metrics.py",
     "feature_boosting/modeling.py",
+    "feature_boosting/overfit.py",
     "feature_boosting/reporting.py",
     "feature_boosting/residual_boosting.py",
     "feature_boosting/shap_analysis.py",

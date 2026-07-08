@@ -134,6 +134,13 @@ def run_experiment(config_path: Path) -> int:
             max_select_per_round=config.boosting.max_select_per_round,
             use_test_for_selection=config.boosting.use_test_for_selection,
             min_valid_bad_samples=config.boosting.min_valid_bad_samples,
+            overfit_guard_enabled=config.boosting.overfit_guard_enabled,
+            overfit_guard_metric_scope=config.boosting.overfit_guard_metric_scope,
+            overfit_guard_min_valid_rmse_reduction=config.boosting.overfit_guard_min_valid_rmse_reduction,
+            overfit_guard_max_valid_after_over_baseline=config.boosting.overfit_guard_max_valid_after_over_baseline,
+            overfit_guard_max_valid_train_gap=config.boosting.overfit_guard_max_valid_train_gap,
+            overfit_guard_use_test=config.boosting.overfit_guard_use_test,
+            overfit_guard_max_test_after_over_baseline=config.boosting.overfit_guard_max_test_after_over_baseline,
             show_progress=config.boosting.show_progress,
             progress_every=config.boosting.progress_every,
         )

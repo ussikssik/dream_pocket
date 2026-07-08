@@ -106,14 +106,14 @@ def fit_regressor(
     params = dict(params or {})
     backend = str(params.pop("backend", "auto")).lower()
     if backend in {"numpy", "numpy_ridge", "linear"}:
-        return NumpyRidgeRegressor(l2=float(params.pop("l2", 1e-6))).fit(train_df[feature_cols], y_train)
+        return NumpyRidgeRegressor(l2=_numpy_l2(params)).fit(train_df[feature_cols], y_train)
 
     try:
         from catboost import CatBoostRegressor, Pool
     except Exception:
         if backend == "catboost":
             raise RuntimeError("catboost is not installed") from None
-        return NumpyRidgeRegressor(l2=float(params.pop("l2", 1e-6))).fit(train_df[feature_cols], y_train)
+        return NumpyRidgeRegressor(l2=_numpy_l2(params)).fit(train_df[feature_cols], y_train)
 
     model_params = dict(DEFAULT_CATBOOST_PARAMS)
     model_params.update(params)
@@ -146,6 +146,10 @@ def _categorical_feature_indices(frame: pd.DataFrame) -> list[int]:
         for idx, col in enumerate(frame.columns)
         if pd.api.types.is_object_dtype(frame[col]) or pd.api.types.is_categorical_dtype(frame[col])
     ]
+
+
+def _numpy_l2(params: dict[str, Any]) -> float:
+    return float(params.pop("l2", params.pop("l2_leaf_reg", 1e-6)))
 
 
 def _prepare_catboost_frame(frame: pd.DataFrame) -> pd.DataFrame:

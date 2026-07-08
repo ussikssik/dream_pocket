@@ -46,6 +46,19 @@ BOOSTING_SELECTION_THRESHOLD = 0.3
 BOOSTING_MAX_SELECT_PER_ROUND = None
 ```
 
+Overfit guard is enabled by default. A candidate feature can appear in the
+ranking chart, but it is not selected if validation residual gets worse than
+the base-feature baseline or if validation improvement is much weaker than
+train improvement.
+
+```python
+AUTO_OVERFIT_SAFE_SETTINGS = True
+OVERFIT_GUARD_ENABLED = True
+OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = 1.0
+OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = 0.25
+OVERFIT_GUARD_USE_TEST = False  # set True only for exploratory checking
+```
+
 정답인자가 있으면 defect별로 넣어두면 candidate rank chart에 별도 마커로 표시됩니다.
 
 ```python

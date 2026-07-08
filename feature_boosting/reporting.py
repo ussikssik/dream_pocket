@@ -99,8 +99,10 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_b
         return
     for defect_id, group in curve.groupby("defect_id", sort=False):
         fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
-        ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
+        for split, color in (("train", "#59a14f"), ("valid", "#4e79a7"), ("test", "#e15759")):
+            col = f"{split}_bad_rmse"
+            if col in group.columns:
+                ax.plot(group["round"], group[col], marker="o", color=color, label=f"{split} bad RMSE")
         answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
         if answer_rules and "selected_feature" in group.columns:
             answers = group[answer_feature_mask(group["selected_feature"], answer_rules)]
@@ -155,7 +157,7 @@ def round_residual_summary(
 
     if residual_curve is not None and not residual_curve.empty:
         for _, row in residual_curve.iterrows():
-            for split in ("valid", "test"):
+            for split in ("train", "valid", "test"):
                 col = f"{split}_{group}_mae"
                 if col not in residual_curve.columns:
                     continue
@@ -295,7 +297,7 @@ def plot_round_residual_points(
     except Exception:
         return None
 
-    splits = [split for split in ("valid", "test") if (summary["split"].astype(str) == split).any()]
+    splits = [split for split in ("train", "valid", "test") if (summary["split"].astype(str) == split).any()]
     if not splits:
         splits = sorted(summary["split"].dropna().astype(str).unique())
     fig, axes = plt.subplots(1, len(splits), figsize=(8 * len(splits), 4.5), squeeze=False)

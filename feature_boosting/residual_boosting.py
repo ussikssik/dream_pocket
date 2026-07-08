@@ -33,6 +33,13 @@ class ResidualFeatureBoosterConfig:
     max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
+    overfit_guard_enabled: bool = True
+    overfit_guard_metric_scope: str = "bad"
+    overfit_guard_min_valid_rmse_reduction: float | None = 0.0
+    overfit_guard_max_valid_after_over_baseline: float | None = 1.0
+    overfit_guard_max_valid_train_gap: float | None = 0.25
+    overfit_guard_use_test: bool = False
+    overfit_guard_max_test_after_over_baseline: float | None = 1.05
     show_progress: bool = True
     progress_every: int = 100
 
@@ -129,6 +136,7 @@ class ResidualFeatureBooster:
                         current_pred_train=current_pred_train,
                         current_pred_valid=current_pred_valid,
                         current_pred_test=current_pred_test,
+                        baseline_pred_train=baseline_pred_train,
                         baseline_pred_valid=baseline_pred_valid,
                         baseline_pred_test=baseline_pred_test,
                         bad_sample_ids=bad_sample_ids,
@@ -143,6 +151,8 @@ class ResidualFeatureBooster:
                     if count == 1 or count == total_candidates or count % every == 0:
                         pct = 100.0 * count / max(total_candidates, 1)
                         print(f"[BOOST {defect_id} round {round_idx}] {count}/{total_candidates} candidates scored ({pct:.1f}%)")
+            for payload in payloads:
+                self._apply_overfit_guard(payload.row)
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
                 break
@@ -157,6 +167,7 @@ class ResidualFeatureBooster:
                 payload
                 for payload in payloads
                 if not payload.row.get("fail_reason")
+                and (not self.config.overfit_guard_enabled or bool(payload.row.get("overfit_guard_pass", False)))
                 and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
             ]
@@ -184,12 +195,15 @@ class ResidualFeatureBooster:
                         defect_id=defect_id,
                         round_idx=round_idx,
                         selected_feature=feature,
+                        train_df=train_df,
                         valid_df=valid_df,
                         test_df=test_df,
                         target_col=target_col,
                         id_col=id_col,
+                        y_train=y_train,
                         y_valid=y_valid,
                         y_test=y_test,
+                        current_pred_train=current_pred_train,
                         current_pred_valid=current_pred_valid,
                         current_pred_test=current_pred_test,
                         bad_sample_ids=bad_sample_ids,
@@ -220,6 +234,7 @@ class ResidualFeatureBooster:
         current_pred_train: np.ndarray,
         current_pred_valid: np.ndarray,
         current_pred_test: np.ndarray,
+        baseline_pred_train: np.ndarray,
         baseline_pred_valid: np.ndarray,
         baseline_pred_test: np.ndarray,
         bad_sample_ids: set[str],
@@ -232,6 +247,24 @@ class ResidualFeatureBooster:
             "defect_id": defect_id,
             "round": round_idx,
             "feature_name": feature,
+            "train_bad_rmse_reduction": np.nan,
+            "train_bad_mae_reduction": np.nan,
+            "train_bad_rmse_before": np.nan,
+            "train_bad_rmse_after": np.nan,
+            "train_bad_mae_before": np.nan,
+            "train_bad_mae_after": np.nan,
+            "train_good_rmse_reduction": np.nan,
+            "train_good_mae_reduction": np.nan,
+            "train_good_rmse_before": np.nan,
+            "train_good_rmse_after": np.nan,
+            "train_good_mae_before": np.nan,
+            "train_good_mae_after": np.nan,
+            "train_global_rmse_reduction": np.nan,
+            "train_global_mae_reduction": np.nan,
+            "train_global_rmse_before": np.nan,
+            "train_global_rmse_after": np.nan,
+            "train_global_mae_before": np.nan,
+            "train_global_mae_after": np.nan,
             "valid_bad_rmse_reduction": np.nan,
             "valid_bad_mae_reduction": np.nan,
             "valid_bad_rmse_before": np.nan,
@@ -273,6 +306,10 @@ class ResidualFeatureBooster:
             "good_coverage": np.nan,
             "selected": False,
             "fail_reason": "",
+            "overfit_guard_pass": False,
+            "overfit_guard_reason": "",
+            "overfit_guard_scope": self.config.overfit_guard_metric_scope,
+            "overfit_gap_valid_train_rmse_ratio": np.nan,
         }
         base_row.update(_empty_baseline_ratio_columns())
         if quality:
@@ -309,8 +346,22 @@ class ResidualFeatureBooster:
             base_row["fail_reason"] = f"model_fit_failed:{type(exc).__name__}"
             return _ScorePayload(base_row)
 
+        pred_train_after = current_pred_train + pred_train
         pred_valid_after = current_pred_valid + pred_valid
         pred_test_after = current_pred_test + pred_test
+        base_row.update(
+            _reduction_columns(
+                prefix="train",
+                df=train_df,
+                id_col=id_col,
+                y=y_train,
+                before=current_pred_train,
+                after=pred_train_after,
+                baseline=baseline_pred_train,
+                bad_sample_ids=bad_sample_ids,
+                good_sample_ids=good_sample_ids,
+            )
+        )
         base_row.update(
             _reduction_columns(
                 prefix="valid",
@@ -338,6 +389,54 @@ class ResidualFeatureBooster:
             )
         )
         return _ScorePayload(base_row, model=model, pred_train=pred_train, pred_valid=pred_valid, pred_test=pred_test)
+
+    def _apply_overfit_guard(self, row: dict[str, Any]) -> None:
+        scope = _normalize_guard_scope(self.config.overfit_guard_metric_scope)
+        row["overfit_guard_scope"] = scope
+        if row.get("fail_reason"):
+            row["overfit_guard_pass"] = False
+            row["overfit_guard_reason"] = f"not_evaluated:{row.get('fail_reason')}"
+            row["overfit_gap_valid_train_rmse_ratio"] = np.nan
+            return
+        if not self.config.overfit_guard_enabled:
+            row["overfit_guard_pass"] = True
+            row["overfit_guard_reason"] = ""
+            row["overfit_gap_valid_train_rmse_ratio"] = _safe_float(row.get(f"valid_{scope}_rmse_after_over_baseline")) - _safe_float(
+                row.get(f"train_{scope}_rmse_after_over_baseline")
+            )
+            return
+
+        reasons: list[str] = []
+        valid_reduction_col = f"valid_{scope}_rmse_reduction"
+        valid_ratio_col = f"valid_{scope}_rmse_after_over_baseline"
+        train_ratio_col = f"train_{scope}_rmse_after_over_baseline"
+        test_ratio_col = f"test_{scope}_rmse_after_over_baseline"
+
+        valid_reduction = _safe_float(row.get(valid_reduction_col))
+        min_reduction = self.config.overfit_guard_min_valid_rmse_reduction
+        if min_reduction is not None and (not np.isfinite(valid_reduction) or valid_reduction <= float(min_reduction)):
+            reasons.append(f"{valid_reduction_col}<={float(min_reduction):g}")
+
+        valid_ratio = _safe_float(row.get(valid_ratio_col))
+        max_valid_ratio = self.config.overfit_guard_max_valid_after_over_baseline
+        if max_valid_ratio is not None and (not np.isfinite(valid_ratio) or valid_ratio > float(max_valid_ratio)):
+            reasons.append(f"{valid_ratio_col}>{float(max_valid_ratio):g}")
+
+        train_ratio = _safe_float(row.get(train_ratio_col))
+        gap = valid_ratio - train_ratio if np.isfinite(valid_ratio) and np.isfinite(train_ratio) else float("nan")
+        row["overfit_gap_valid_train_rmse_ratio"] = gap
+        max_gap = self.config.overfit_guard_max_valid_train_gap
+        if max_gap is not None and np.isfinite(gap) and gap > float(max_gap):
+            reasons.append(f"valid_train_{scope}_rmse_ratio_gap>{float(max_gap):g}")
+
+        if self.config.overfit_guard_use_test:
+            test_ratio = _safe_float(row.get(test_ratio_col))
+            max_test_ratio = self.config.overfit_guard_max_test_after_over_baseline
+            if max_test_ratio is not None and np.isfinite(test_ratio) and test_ratio > float(max_test_ratio):
+                reasons.append(f"{test_ratio_col}>{float(max_test_ratio):g}")
+
+        row["overfit_guard_pass"] = not reasons
+        row["overfit_guard_reason"] = ";".join(reasons)
 
     def _select_payloads(self, payloads: list[_ScorePayload], *, metric: str, higher_is_better: bool) -> list[_ScorePayload]:
         mode = str(self.config.selection_mode).strip().lower()
@@ -374,17 +473,22 @@ class ResidualFeatureBooster:
         defect_id: str,
         round_idx: int,
         selected_feature: str,
+        train_df: pd.DataFrame,
         valid_df: pd.DataFrame,
         test_df: pd.DataFrame,
         target_col: str,
         id_col: str,
+        y_train: np.ndarray,
         y_valid: np.ndarray,
         y_test: np.ndarray,
+        current_pred_train: np.ndarray,
         current_pred_valid: np.ndarray,
         current_pred_test: np.ndarray,
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
     ) -> dict[str, Any]:
+        train_bad = _mask(train_df, id_col, bad_sample_ids)
+        train_good = _mask(train_df, id_col, good_sample_ids)
         valid_bad = _mask(valid_df, id_col, bad_sample_ids)
         valid_good = _mask(valid_df, id_col, good_sample_ids)
         test_bad = _mask(test_df, id_col, bad_sample_ids)
@@ -393,6 +497,10 @@ class ResidualFeatureBooster:
             "defect_id": defect_id,
             "round": round_idx,
             "selected_feature": selected_feature,
+            "train_bad_rmse": rmse(y_train[train_bad], current_pred_train[train_bad]),
+            "train_bad_mae": mae(y_train[train_bad], current_pred_train[train_bad]),
+            "train_good_rmse": rmse(y_train[train_good], current_pred_train[train_good]),
+            "train_good_mae": mae(y_train[train_good], current_pred_train[train_good]),
             "valid_bad_rmse": rmse(y_valid[valid_bad], current_pred_valid[valid_bad]),
             "valid_bad_mae": mae(y_valid[valid_bad], current_pred_valid[valid_bad]),
             "valid_good_rmse": rmse(y_valid[valid_good], current_pred_valid[valid_good]),
@@ -401,6 +509,7 @@ class ResidualFeatureBooster:
             "test_bad_mae": mae(y_test[test_bad], current_pred_test[test_bad]),
             "test_good_rmse": rmse(y_test[test_good], current_pred_test[test_good]),
             "test_good_mae": mae(y_test[test_good], current_pred_test[test_good]),
+            "train_global_rmse": rmse(y_train, current_pred_train),
             "valid_global_rmse": rmse(y_valid, current_pred_valid),
             "test_global_rmse": rmse(y_test, current_pred_test),
         }
@@ -457,6 +566,13 @@ def _quality_lookup(summary: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
     return summary.set_index("feature_name").to_dict(orient="index")
 
 
+def _normalize_guard_scope(scope: str) -> str:
+    normalized = str(scope).strip().lower()
+    if normalized in {"bad", "good", "global"}:
+        return normalized
+    raise ValueError(f"unsupported overfit_guard_metric_scope: {scope!r}")
+
+
 def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
     if metric in {"bad_rmse_reduction", "rmse_reduction"}:
         return "test_bad_rmse_reduction" if use_test_for_selection else "valid_bad_rmse_reduction"
@@ -495,6 +611,13 @@ def _safe_divide(numerator: float, denominator: float) -> float:
     return float(numerator / denominator)
 
 
+def _safe_float(value: Any) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
 def _safe_pct_reduction(before: float, after: float) -> float:
     if not np.isfinite(before) or not np.isfinite(after) or before == 0:
         return float("nan")
@@ -503,7 +626,7 @@ def _safe_pct_reduction(before: float, after: float) -> float:
 
 def _empty_baseline_ratio_columns() -> dict[str, float]:
     result: dict[str, float] = {}
-    for prefix in ("valid", "test"):
+    for prefix in ("train", "valid", "test"):
         for group in ("bad", "good", "global"):
             for metric in ("rmse", "mae"):
                 result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
@@ -519,6 +642,11 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "round",
         "feature_name",
         "ranking_metric",
+        "train_bad_rmse_baseline",
+        "train_bad_rmse_before",
+        "train_bad_rmse_after",
+        "train_bad_rmse_reduction",
+        "train_bad_rmse_after_over_baseline",
         "valid_bad_rmse_baseline",
         "valid_bad_rmse_before",
         "valid_bad_rmse_after",
@@ -534,9 +662,16 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "valid_global_rmse_after",
         "valid_global_rmse_reduction",
         "valid_global_rmse_after_over_baseline",
+        "train_global_rmse_after",
+        "train_global_rmse_reduction",
+        "train_global_rmse_after_over_baseline",
         "test_global_rmse_after",
         "test_global_rmse_reduction",
         "test_global_rmse_after_over_baseline",
+        "overfit_guard_pass",
+        "overfit_guard_reason",
+        "overfit_guard_scope",
+        "overfit_gap_valid_train_rmse_ratio",
     ]
     return {key: row.get(key, np.nan) for key in keys}
 
