@@ -80,6 +80,45 @@ class ResidualBoostingTests(unittest.TestCase):
         selected = set(result.selected_features["feature_name"].astype(str))
         self.assertEqual(selected, {"hidden"})
 
+    def test_always_rank_cols_keep_answer_visible_after_selection(self) -> None:
+        df = _synthetic_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df.loc[df["hidden"] > df["hidden"].median(), "sample_id"])
+        good_ids = set(df.loc[df["hidden"] <= df["hidden"].median(), "sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=2,
+                min_improvement=0.0,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden", "noise_feature"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=good_ids,
+            always_rank_cols=["hidden"],
+        )
+
+        self.assertGreaterEqual(len(result.rankings), 2)
+        round_1 = result.rankings[0].set_index("feature_name")
+        round_2 = result.rankings[1].set_index("feature_name")
+        self.assertTrue(bool(round_1.loc["hidden", "selected"]))
+        self.assertIn("hidden", round_2.index)
+        self.assertFalse(bool(round_2.loc["hidden", "eligible_for_selection"]))
+        self.assertTrue(bool(round_2.loc["hidden", "ranking_only"]))
+        self.assertTrue(bool(round_2.loc["hidden", "already_selected"]))
+
     def test_overfit_guard_rejects_train_only_signal(self) -> None:
         df = _overfit_frame()
         train_df = df[df["split"] == "train"].copy()

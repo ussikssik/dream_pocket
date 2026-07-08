@@ -79,6 +79,7 @@ class ResidualFeatureBooster:
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
         quality_summary: pd.DataFrame | None = None,
+        always_rank_cols: list[str] | None = None,
         output_dir: str | Path | None = None,
     ) -> BoostingResult:
         valid_bad_mask = valid_df[id_col].astype(str).isin(bad_sample_ids).to_numpy()
@@ -95,7 +96,10 @@ class ResidualFeatureBooster:
         current_pred_valid = baseline_pred_valid.copy()
         current_pred_test = baseline_pred_test.copy()
 
-        remaining = list(dict.fromkeys(candidate_cols))
+        all_candidates = list(dict.fromkeys(candidate_cols))
+        remaining = all_candidates.copy()
+        always_rank_set = set(always_rank_cols or []) & set(all_candidates)
+        selected_history: set[str] = set()
         selected_records: list[dict[str, Any]] = []
         curve_records: list[dict[str, Any]] = []
         rankings: list[pd.DataFrame] = []
@@ -115,9 +119,11 @@ class ResidualFeatureBooster:
                 break
 
             payloads = []
-            total_candidates = len(remaining)
+            ranking_features = list(dict.fromkeys([*remaining, *[feature for feature in all_candidates if feature in always_rank_set]]))
+            remaining_set = set(remaining)
+            total_candidates = len(ranking_features)
             iterator = _progress_iterator(
-                remaining,
+                ranking_features,
                 enabled=self.config.show_progress,
                 desc=f"{defect_id} round {round_idx}",
             )
@@ -152,6 +158,10 @@ class ResidualFeatureBooster:
                         pct = 100.0 * count / max(total_candidates, 1)
                         print(f"[BOOST {defect_id} round {round_idx}] {count}/{total_candidates} candidates scored ({pct:.1f}%)")
             for payload in payloads:
+                feature_name = str(payload.row.get("feature_name", ""))
+                payload.row["eligible_for_selection"] = feature_name in remaining_set
+                payload.row["ranking_only"] = feature_name not in remaining_set
+                payload.row["already_selected"] = feature_name in selected_history
                 self._apply_overfit_guard(payload.row)
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
@@ -170,6 +180,7 @@ class ResidualFeatureBooster:
                 and (not self.config.overfit_guard_enabled or bool(payload.row.get("overfit_guard_pass", False)))
                 and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
+                and bool(payload.row.get("eligible_for_selection", True))
             ]
             valid_payloads.sort(key=lambda item: float(item.row.get(selection_metric, np.nan)), reverse=higher_is_better)
             selected_payloads = self._select_payloads(valid_payloads, metric=selection_metric, higher_is_better=higher_is_better)
@@ -190,6 +201,7 @@ class ResidualFeatureBooster:
                 current_pred_valid = current_pred_valid + payload.pred_valid
                 current_pred_test = current_pred_test + payload.pred_test
                 selected_records.append(_selected_record(payload.row))
+                selected_history.add(feature)
                 curve_records.append(
                     self._curve_record(
                         defect_id=defect_id,
@@ -305,6 +317,9 @@ class ResidualFeatureBooster:
             "bad_coverage": np.nan,
             "good_coverage": np.nan,
             "selected": False,
+            "eligible_for_selection": True,
+            "ranking_only": False,
+            "already_selected": False,
             "fail_reason": "",
             "overfit_guard_pass": False,
             "overfit_guard_reason": "",
