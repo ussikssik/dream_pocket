@@ -149,8 +149,8 @@ data/residual_poc_toyset/
 입력 파일 기본 형태:
 
 ```text
-data/base_dataset.parquet          # sample_id, yield, split(train/valid/test), base features
-data/candidate_features.parquet    # sample_id, sampled candidate features
+data/base_dataset.csv              # sample_id, yield, split(train/valid/test), base features
+data/candidate_features.csv        # sample_id, sampled candidate features
 data/base_feature_cols.txt         # baseline Xb feature list
 data/groups/defect_1_bad.csv       # sample_id
 data/groups/defect_1_good.csv      # sample_id
@@ -553,8 +553,8 @@ FILE: configs/experiment.yaml
 run_id: "yield_residual_boosting_poc_001"
 
 paths:
-  base_dataset: "data/base_dataset.parquet"
-  candidate_features: "data/candidate_features.parquet"
+  base_dataset: "data/base_dataset.csv"
+  candidate_features: "data/candidate_features.csv"
   base_feature_cols: "data/base_feature_cols.txt"
   output_dir: "outputs"
 
@@ -4524,8 +4524,8 @@ TARGET_COL = "yield"
 SPLIT_COL = "split"
 
 # Default paths for already-standardized inputs.
-BASE_DATASET_PATH = ROOT / "data" / "base_dataset.parquet"
-CANDIDATE_FEATURES_PATH = ROOT / "data" / "candidate_features.parquet"
+BASE_DATASET_PATH = ROOT / "data" / "base_dataset.csv"
+CANDIDATE_FEATURES_PATH = ROOT / "data" / "candidate_features.csv"
 BASE_FEATURE_COLS_PATH = ROOT / "data" / "base_feature_cols.txt"
 OUTPUT_BASE_DIR = ROOT / "outputs"
 

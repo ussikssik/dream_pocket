@@ -1,8 +1,8 @@
 run_id: "yield_residual_boosting_poc_001"
 
 paths:
-  base_dataset: "data/base_dataset.parquet"
-  candidate_features: "data/candidate_features.parquet"
+  base_dataset: "data/base_dataset.csv"
+  candidate_features: "data/candidate_features.csv"
   base_feature_cols: "data/base_feature_cols.txt"
   output_dir: "outputs"
 

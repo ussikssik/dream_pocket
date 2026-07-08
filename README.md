@@ -108,8 +108,8 @@ data/residual_poc_toyset/
 입력 파일 기본 형태:
 
 ```text
-data/base_dataset.parquet          # sample_id, yield, split(train/valid/test), base features
-data/candidate_features.parquet    # sample_id, sampled candidate features
+data/base_dataset.csv              # sample_id, yield, split(train/valid/test), base features
+data/candidate_features.csv        # sample_id, sampled candidate features
 data/base_feature_cols.txt         # baseline Xb feature list
 data/groups/defect_1_bad.csv       # sample_id
 data/groups/defect_1_good.csv      # sample_id
