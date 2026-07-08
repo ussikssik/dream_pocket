@@ -14,6 +14,28 @@ VS Code에서 바로 돌릴 때는 아래 노트북을 여세요. YAML 파일은
 notebooks/residual_feature_boosting_poc.ipynb
 ```
 
+처음 clone한 직후에는 실제 데이터가 없어도 됩니다. 노트북 기본값이 `USE_DEMO_DATA = True`라서 실행 중에 toyset을 자동으로 만듭니다.
+
+```text
+data/residual_poc_demo/
+  base_dataset.csv
+  candidate_features.csv
+  base_feature_cols.txt
+  groups/
+```
+
+터미널에서 toyset만 따로 만들고 싶으면:
+
+```powershell
+python scripts/generate_residual_poc_toyset.py
+```
+
+이 명령은 아래 경로에 같은 구조의 toyset을 만듭니다.
+
+```text
+data/residual_poc_toyset/
+```
+
 입력 파일 기본 형태:
 
 ```text
