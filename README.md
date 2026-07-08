@@ -105,10 +105,14 @@ selected_features.csv
 residual_reduction_curve.csv
 round_mean_residual_summary.csv
 final_model_metrics.csv
+final_model_metric_summary.csv
+final_feature_set_summary.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
 plots/{defect_id}_round_{round}_candidate_loss.png
 plots/round_mean_abs_residual_points.png
+plots/final_model_metric_comparison.png
+plots/final_feature_set_summary.png
 models/baseline_model.cbm
 models/final_model.cbm
 ```

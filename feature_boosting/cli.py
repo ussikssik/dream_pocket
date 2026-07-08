@@ -19,7 +19,10 @@ from .final_model import evaluate_model_by_groups, predict_final, train_final_mo
 from .reporting import (
     baseline_residual_summary,
     copy_config,
+    final_metric_summary,
     plot_candidate_loss_ranking,
+    plot_final_feature_set_summary,
+    plot_final_metric_comparison,
     plot_residual_curve,
     plot_round_residual_points,
     prepare_output_dir,
@@ -200,6 +203,14 @@ def run_experiment(config_path: Path) -> int:
 
     selected_cols = _unique_selected_features(selected_features, candidate_cols)
     final_feature_cols = base_feature_cols + selected_cols
+    final_feature_summary = pd.DataFrame(
+        [
+            {"feature_type": "base", "count": len(base_feature_cols)},
+            {"feature_type": "selected", "count": len(selected_cols)},
+        ]
+    )
+    write_csv(final_feature_summary, output_dir / "final_feature_set_summary.csv")
+    plot_final_feature_set_summary(final_feature_summary, output_path=output_dir / "plots" / "final_feature_set_summary.png")
     logger.info("[FINAL] training final model with n_selected=%s", len(selected_cols))
     final_params = config.final_model or config.baseline_model
     final_model = train_final_model(train_df, valid_df, feature_cols=final_feature_cols, target_col=cols.target_col, catboost_params=final_params)
@@ -229,6 +240,9 @@ def run_experiment(config_path: Path) -> int:
         ignore_index=True,
     )
     write_csv(final_metrics, output_dir / "final_model_metrics.csv")
+    final_metric_summary_df = final_metric_summary(final_metrics)
+    write_csv(final_metric_summary_df, output_dir / "final_model_metric_summary.csv")
+    plot_final_metric_comparison(final_metric_summary_df, output_path=output_dir / "plots" / "final_model_metric_comparison.png")
 
     if config.shap.enabled:
         logger.info("[SHAP] calculating SHAP summary")

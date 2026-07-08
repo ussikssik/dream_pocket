@@ -161,6 +161,110 @@ def round_residual_summary(
     return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
 
 
+def final_metric_summary(
+    final_metrics: pd.DataFrame,
+    *,
+    baseline_name: str = "baseline",
+    final_name: str = "final",
+) -> pd.DataFrame:
+    """Compare baseline and final metrics on the same split/defect/group rows."""
+    if final_metrics.empty:
+        return pd.DataFrame()
+    required = {"model_name", "defect_id", "group", "split"}
+    missing = sorted(required - set(final_metrics.columns))
+    if missing:
+        raise ValueError(f"final_metrics is missing required columns: {missing}")
+
+    id_cols = ["defect_id", "group", "split"]
+    metric_cols = [col for col in ("n_samples", "mae", "rmse", "r2") if col in final_metrics.columns]
+    baseline = (
+        final_metrics[final_metrics["model_name"].astype(str) == baseline_name][id_cols + metric_cols]
+        .copy()
+        .rename(columns={col: f"baseline_{col}" for col in metric_cols})
+    )
+    final = (
+        final_metrics[final_metrics["model_name"].astype(str) == final_name][id_cols + metric_cols]
+        .copy()
+        .rename(columns={col: f"final_{col}" for col in metric_cols})
+    )
+    summary = baseline.merge(final, on=id_cols, how="outer")
+    if summary.empty:
+        return summary
+
+    if "baseline_n_samples" in summary.columns or "final_n_samples" in summary.columns:
+        summary["n_samples"] = summary.get("final_n_samples", pd.Series(index=summary.index, dtype=float)).combine_first(
+            summary.get("baseline_n_samples", pd.Series(index=summary.index, dtype=float))
+        )
+
+    for metric in ("rmse", "mae"):
+        before_col = f"baseline_{metric}"
+        after_col = f"final_{metric}"
+        if before_col not in summary.columns or after_col not in summary.columns:
+            continue
+        before = pd.to_numeric(summary[before_col], errors="coerce")
+        after = pd.to_numeric(summary[after_col], errors="coerce")
+        reduction = before - after
+        summary[f"{metric}_reduction"] = reduction
+        summary[f"{metric}_reduction_pct"] = np.where(before.abs() > 0, 100.0 * reduction / before, np.nan)
+
+    if "baseline_r2" in summary.columns and "final_r2" in summary.columns:
+        summary["r2_delta"] = pd.to_numeric(summary["final_r2"], errors="coerce") - pd.to_numeric(summary["baseline_r2"], errors="coerce")
+
+    summary["label"] = [_metric_label(defect_id, group) for defect_id, group in zip(summary["defect_id"], summary["group"])]
+    return _sort_metric_summary(summary).reset_index(drop=True)
+
+
+def plot_final_metric_comparison(
+    summary_or_metrics: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    splits: tuple[str, ...] = ("valid", "test"),
+    metrics: tuple[str, ...] = ("rmse", "mae"),
+    title: str = "baseline vs final model metrics",
+):
+    """Plot baseline/final RMSE and MAE side by side by split and defect group."""
+    if summary_or_metrics.empty:
+        return None
+    summary = summary_or_metrics.copy()
+    if not any(col.startswith("baseline_") for col in summary.columns):
+        summary = final_metric_summary(summary)
+    if summary.empty:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    available_splits = [split for split in splits if (summary["split"].astype(str) == split).any()]
+    if not available_splits:
+        available_splits = sorted(summary["split"].dropna().astype(str).unique())
+    available_metrics = [metric for metric in metrics if f"baseline_{metric}" in summary.columns and f"final_{metric}" in summary.columns]
+    if not available_splits or not available_metrics:
+        return None
+
+    max_rows = max(int((summary["split"].astype(str) == split).sum()) for split in available_splits)
+    height = max(4.0, 0.45 * max_rows) * len(available_splits)
+    fig, axes = plt.subplots(
+        len(available_splits),
+        len(available_metrics),
+        figsize=(7.5 * len(available_metrics), height),
+        squeeze=False,
+    )
+
+    for row_idx, split in enumerate(available_splits):
+        split_df = _sort_metric_summary(summary[summary["split"].astype(str) == split].copy())
+        for col_idx, metric in enumerate(available_metrics):
+            _plot_final_metric_axis(axes[row_idx][col_idx], split_df, metric, split)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
 def plot_round_residual_points(
     summary: pd.DataFrame,
     *,
@@ -201,6 +305,38 @@ def plot_round_residual_points(
         ax.set_ylabel("mean abs residual (MAE)")
         ax.grid(alpha=0.25)
         ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
+def plot_final_feature_set_summary(
+    feature_summary: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    title: str = "final model feature set",
+):
+    if feature_summary.empty or not {"feature_type", "count"}.issubset(feature_summary.columns):
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    work = feature_summary.copy()
+    work["count"] = pd.to_numeric(work["count"], errors="coerce").fillna(0)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    colors = ["#4e79a7" if item == "base" else "#f28e2b" for item in work["feature_type"].astype(str)]
+    bars = ax.bar(work["feature_type"].astype(str), work["count"], color=colors, width=0.55)
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f"{int(height)}", (bar.get_x() + bar.get_width() / 2, height), ha="center", va="bottom", fontsize=10)
+    ax.set_title(title)
+    ax.set_ylabel("feature count")
+    ax.grid(axis="y", alpha=0.25)
     fig.tight_layout()
     if output_path is not None:
         output_path = Path(output_path)
@@ -276,6 +412,62 @@ def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, s
     ax.set_ylabel(metric_col)
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8)
+
+
+def _plot_final_metric_axis(ax, split_df: pd.DataFrame, metric: str, split: str) -> None:
+    if split_df.empty:
+        ax.set_title(f"{split} {metric.upper()}")
+        ax.text(0.5, 0.5, "no rows", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    labels = split_df["label"].astype(str).tolist()
+    y = np.arange(len(split_df))
+    baseline = pd.to_numeric(split_df[f"baseline_{metric}"], errors="coerce")
+    final = pd.to_numeric(split_df[f"final_{metric}"], errors="coerce")
+    ax.barh(y - 0.18, baseline, height=0.36, color="#4e79a7", label="baseline")
+    ax.barh(y + 0.18, final, height=0.36, color="#f28e2b", label="final")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title(f"{split} {metric.upper()} (lower is better)")
+    ax.set_xlabel(metric.upper())
+    ax.grid(axis="x", alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+
+    finite_values = pd.concat([baseline, final]).dropna()
+    max_value = float(finite_values.max()) if not finite_values.empty else 0.0
+    x_pad = max(max_value * 0.015, 1e-9)
+    for ypos, (_, row) in enumerate(split_df.iterrows()):
+        pct = row.get(f"{metric}_reduction_pct", np.nan)
+        if pd.isna(pct) or not np.isfinite(float(pct)):
+            continue
+        row_values = pd.to_numeric(pd.Series([row.get(f"baseline_{metric}", np.nan), row.get(f"final_{metric}", np.nan)]), errors="coerce").dropna()
+        if row_values.empty:
+            continue
+        x_value = float(row_values.max())
+        color = "#2a9d8f" if float(pct) >= 0 else "#d62828"
+        ax.text(x_value + x_pad, ypos, f"{float(pct):+.1f}%", va="center", fontsize=8, color=color)
+    ax.margins(x=0.15)
+
+
+def _sort_metric_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+    work = summary.copy()
+    split_order = {"train": 0, "valid": 1, "test": 2}
+    group_order = {"global": 0, "bad": 1, "good": 2}
+    work["_split_order"] = work["split"].astype(str).map(split_order).fillna(99)
+    work["_defect_order"] = np.where(work["defect_id"].astype(str) == "global", "", work["defect_id"].astype(str))
+    work["_group_order"] = work["group"].astype(str).map(group_order).fillna(99)
+    work = work.sort_values(["_split_order", "_defect_order", "_group_order", "label"])
+    return work.drop(columns=["_split_order", "_defect_order", "_group_order"], errors="ignore")
+
+
+def _metric_label(defect_id: object, group: object) -> str:
+    if str(defect_id) == "global" and str(group) == "global":
+        return "all wafers"
+    return f"{defect_id} / {group}"
 
 
 def _residual_row(
