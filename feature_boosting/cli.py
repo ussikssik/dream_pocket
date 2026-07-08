@@ -19,6 +19,7 @@ from .final_model import evaluate_model_by_groups, predict_final, train_final_mo
 from .reporting import (
     baseline_residual_summary,
     copy_config,
+    plot_candidate_loss_ranking,
     plot_residual_curve,
     plot_round_residual_points,
     prepare_output_dir,
@@ -162,6 +163,17 @@ def run_experiment(config_path: Path) -> int:
             quality_summary=quality,
             output_dir=output_dir / "rankings",
         )
+        for ranking_df in result.rankings:
+            if ranking_df.empty or "round" not in ranking_df.columns:
+                continue
+            round_no = int(ranking_df["round"].max())
+            plot_candidate_loss_ranking(
+                ranking_df,
+                output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
+                global_metric_col="valid_global_rmse_after",
+                bad_metric_col="valid_bad_rmse_after",
+                title_prefix=f"{defect.defect_id} round {round_no}",
+            )
         if not result.selected_features.empty:
             selected_frames.append(result.selected_features)
             first = result.selected_features.iloc[0]

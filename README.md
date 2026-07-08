@@ -67,6 +67,28 @@ data/groups/defect_1_bad.csv       # sample_id
 data/groups/defect_1_good.csv      # sample_id
 ```
 
+실제 데이터가 아래 6개 파일 구조라면 노트북에서 `USE_DEMO_DATA = False`, `USE_RAW_SIX_FILE_DATA = True`로 바꾸고 `RAW_*` 설정만 맞추면 됩니다. 파일별 컬럼명이 서로 달라도 설정에서 지정할 수 있습니다.
+
+```text
+1) y file:              lot / wf / y
+2) candidate file:      lot / wf / candidate feature n개
+3) base feature file:   lot / wf / base feature m개
+4) defect_1 group file: lot / wf / good_bad
+5) defect_2 group file: lot / wf / good_bad
+6) defect_3 group file: lot / wf / good_bad
+```
+
+노트북은 이 raw 파일들을 먼저 아래 표준 입력으로 변환한 뒤 기존 boosting 코드를 실행합니다.
+
+```text
+data/standardized_from_raw/
+  base_dataset.csv
+  candidate_features.csv
+  base_feature_cols.txt
+  groups/{defect_id}_bad.csv
+  groups/{defect_id}_good.csv
+```
+
 VS Code 노트북 대신 CLI로 반복 실행하고 싶을 때:
 
 ```powershell
@@ -85,6 +107,7 @@ round_mean_residual_summary.csv
 final_model_metrics.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
+plots/{defect_id}_round_{round}_candidate_loss.png
 plots/round_mean_abs_residual_points.png
 models/baseline_model.cbm
 models/final_model.cbm
