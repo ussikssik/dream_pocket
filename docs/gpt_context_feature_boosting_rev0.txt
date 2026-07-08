@@ -1,0 +1,4205 @@
+# GPT Context Snapshot: feature_boosting_rev0
+
+이 파일은 사내망에서 GPT에게 한 번에 복붙해서 프로젝트 구조와 코드를 설명하기 위한 단일 텍스트 스냅샷입니다.
+데이터 파일, output 파일, notebook 실행 결과는 제외하고 Residual-Based Feature Boosting PoC 실행에 필요한 코드와 설정을 담았습니다.
+
+GPT에게 붙여넣을 때는 먼저 이렇게 요청하면 됩니다:
+"아래는 feature_boosting_rev0 프로젝트의 단일 파일 코드 스냅샷이야. 전체 구조를 이해하고, 내가 묻는 코드/수식/실행 오류를 이 맥락 기준으로 설명해줘."
+
+## Included Files
+
+- README.md
+- requirements.txt
+- configs/experiment.yaml
+- feature_boosting/__init__.py
+- feature_boosting/baseline_model.py
+- feature_boosting/cli.py
+- feature_boosting/config.py
+- feature_boosting/data_loader.py
+- feature_boosting/final_model.py
+- feature_boosting/metrics.py
+- feature_boosting/modeling.py
+- feature_boosting/reporting.py
+- feature_boosting/residual_boosting.py
+- feature_boosting/shap_analysis.py
+- feature_boosting/splitter.py
+- feature_boosting/validation.py
+- scripts/build_gpt_context.py
+- scripts/generate_residual_poc_toyset.py
+- scripts/run_experiment.py
+- tests/test_data_loader.py
+- tests/test_metrics.py
+- tests/test_reporting.py
+- tests/test_residual_boosting.py
+- tests/test_validation.py
+- notebooks/residual_feature_boosting_poc.ipynb (extracted notebook cells)
+
+====================================================================================================
+FILE: README.md
+====================================================================================================
+# Defect A Feature Evidence Booster
+
+반도체 공정에서 여러 불량이 섞인 weak label 상황을 가정한 feature boosting 모듈입니다.
+
+이 모듈은 단순히 Good/Bad 분류 성능을 높이는 feature selector가 아닙니다. 목적은 특정 불량 A와 관련된 원인 후보 feature를 order별로 끌어올리고, XAI/통계/안정성 관점의 evidence를 같이 남기는 것입니다.
+
+## Residual-Based Feature Boosting PoC
+
+`feature_boosting/` 패키지는 CatBoost 수율회귀 baseline이 남긴 residual을 sampled candidate feature가 설명할 수 있는지 검증하는 별도 PoC 파이프라인입니다.
+
+VS Code에서 바로 돌릴 때는 아래 노트북을 여세요. YAML 파일은 CLI 반복 실행용이라 필수는 아닙니다.
+
+```text
+notebooks/residual_feature_boosting_poc.ipynb
+```
+
+처음 clone한 직후에는 실제 데이터가 없어도 됩니다. 노트북 기본값이 `USE_DEMO_DATA = True`라서 실행 중에 toyset을 자동으로 만듭니다.
+
+노트북 기본 toyset 크기는 wafer 14,000매, candidate feature 5,000개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
+
+```python
+USE_DEMO_DATA = True
+DEMO_N_WAFERS = 14_000
+DEMO_N_CANDIDATE_FEATURES = 5_000
+```
+
+처음 빠르게 동작만 확인하고 싶으면 예를 들어 이렇게 줄여서 실행하세요.
+
+```python
+DEMO_N_WAFERS = 600
+DEMO_N_CANDIDATE_FEATURES = 200
+```
+
+```text
+data/residual_poc_demo/
+  base_dataset.csv
+  candidate_features.csv
+  base_feature_cols.txt
+  groups/
+```
+
+터미널에서 toyset만 따로 만들고 싶으면:
+
+```powershell
+python scripts/generate_residual_poc_toyset.py
+```
+
+크기를 직접 지정할 수도 있습니다.
+
+```powershell
+python scripts/generate_residual_poc_toyset.py --rows 14000 --candidate-features 5000
+```
+
+이 명령은 아래 경로에 같은 구조의 toyset을 만듭니다.
+
+```text
+data/residual_poc_toyset/
+```
+
+입력 파일 기본 형태:
+
+```text
+data/base_dataset.parquet          # sample_id, yield, split(train/valid/test), base features
+data/candidate_features.parquet    # sample_id, sampled candidate features
+data/base_feature_cols.txt         # baseline Xb feature list
+data/groups/defect_1_bad.csv       # sample_id
+data/groups/defect_1_good.csv      # sample_id
+```
+
+실제 데이터가 아래 6개 파일 구조라면 노트북에서 `USE_DEMO_DATA = False`, `USE_RAW_SIX_FILE_DATA = True`로 바꾸고 `RAW_*` 설정만 맞추면 됩니다. 파일별 컬럼명이 서로 달라도 설정에서 지정할 수 있습니다.
+
+```text
+1) y file:              lot / wf / y
+2) candidate file:      lot / wf / candidate feature n개
+3) base feature file:   lot / wf / base feature m개
+4) defect_1 group file: lot / wf / good_bad
+5) defect_2 group file: lot / wf / good_bad
+6) defect_3 group file: lot / wf / good_bad
+```
+
+노트북은 이 raw 파일들을 먼저 아래 표준 입력으로 변환한 뒤 기존 boosting 코드를 실행합니다.
+
+```text
+data/standardized_from_raw/
+  base_dataset.csv
+  candidate_features.csv
+  base_feature_cols.txt
+  groups/{defect_id}_bad.csv
+  groups/{defect_id}_good.csv
+```
+
+VS Code 노트북 대신 CLI로 반복 실행하고 싶을 때:
+
+```powershell
+python scripts/run_experiment.py --config configs/experiment.yaml
+```
+
+주요 산출물은 `outputs/{run_id}/` 아래에 저장됩니다.
+
+```text
+baseline_metrics.csv
+baseline_residual_summary.csv
+candidate_quality_summary.csv
+selected_features.csv
+residual_reduction_curve.csv
+round_mean_residual_summary.csv
+final_model_metrics.csv
+final_model_metric_summary.csv
+final_feature_set_summary.csv
+shap_summary.csv
+rankings/{defect_id}_round_{round}.csv
+plots/{defect_id}_round_{round}_candidate_loss.png
+plots/round_mean_abs_residual_points.png
+plots/final_model_metric_comparison.png
+plots/final_feature_set_summary.png
+models/baseline_model.cbm
+models/final_model.cbm
+```
+
+가장 중요한 원칙은 residual boosting 단계에서는 `Xb`를 다시 학습하지 않는 것입니다. 각 round에서는 후보 feature `x_j` 하나만으로 현재 residual을 예측하고, feature 선택은 validation bad group의 `bad_rmse_reduction` 기준으로 수행합니다. Test metric은 기록과 검증에만 사용합니다.
+
+## 핵심 원칙
+
+- Good 또는 Bad 한쪽에서만 존재하는 feature는 제거하지 않습니다.
+- CatBoost 성능 개선은 최종 ranking의 필수 조건이 아닙니다.
+- CatBoost는 설치되어 있을 때 SHAP consistency를 계산하는 보조 XAI probe로 사용합니다.
+- 최종 점수는 contrast, 방향 안정성, bootstrap stability, groupwise stability, asymmetric presence, SHAP consistency, confounding risk, redundancy penalty를 합쳐 계산합니다.
+
+## 기본 사용법
+
+```python
+from feature_booster import BoosterConfig, DefectAFeatureEvidenceBooster
+
+def load_order(order_id):
+    # DB, parquet, CSV 등에서 order별 데이터를 반환
+    # label_col, group_cols, feature columns가 한 DataFrame 안에 있으면 됩니다.
+    return df
+
+config = BoosterConfig(
+    label_col="target_bad_a",
+    positive_label=1,
+    group_cols=("lot_id", "tool_id"),
+    sample_id_cols=("wafer_id",),
+    exclude_cols=("eds_bin_no_wf_mean", "eds_yield_wf_mean"),
+)
+
+booster = DefectAFeatureEvidenceBooster(load_order, config)
+
+result = booster.run(
+    order_list=list(range(1, 101)),
+    top_k_per_order=10,
+)
+```
+
+## 결과 컬럼
+
+주요 산출 컬럼은 다음과 같습니다.
+
+```text
+order_id
+final_rank
+feature_name
+final_score
+evidence_reason
+presence_type
+bad_coverage
+good_coverage
+direction
+effect_size
+fdr_pvalue
+bootstrap_stability_score
+groupwise_stability_score
+xai_consistency_score
+shap_abs_mean
+confounding_risk_score
+redundancy_group
+quality_warning
+confounding_warning
+xai_warning
+```
+
+`presence_type`은 `bad_only`, `good_only`, `bad_enriched_sparse`, `good_enriched_sparse`, `both_groups` 중 하나입니다.
+
+## CatBoost 사용
+
+`catboost`가 설치되어 있으면 기본적으로 SHAP probe가 동작합니다. 설치되어 있지 않으면 `xai_warning=catboost_not_installed`가 남고, 통계/evidence 기반 ranking은 그대로 수행됩니다.
+
+CatBoost를 끄고 싶으면:
+
+```python
+from feature_booster import BoosterConfig, CatBoostProbeConfig
+
+config = BoosterConfig(
+    catboost=CatBoostProbeConfig(enabled=False),
+)
+```
+
+## 예제 실행
+
+```powershell
+python examples/run_feature_booster_example.py
+```
+
+## Toy semiconductor dataset
+
+실제 실행 테스트용 toy dataset은 아래 명령으로 생성합니다.
+
+```powershell
+python examples/generate_toy_semiconductor_dataset.py
+```
+
+생성 위치:
+
+```text
+data/toy_semiconductor/
+  order_001.csv
+  order_002.csv
+  order_003.csv
+  order_004.csv
+  order_005.csv
+  toy_semiconductor_all_orders.csv
+  feature_metadata.csv
+  target_summary_by_order.csv
+```
+
+포함된 컬럼 예시는 다음과 같습니다.
+
+```text
+sensor_*                  공정 sensor 값
+measure_*                 계측 measure 값
+midproc_defect_*_count    최종 불량이 아닌 중간공정 defect count
+equipment_name            설비명
+chamber_id                chamber
+process_step              공정 step
+process_time_sec          공정 시간
+eds_*                     최종 EDS 기반 y/검증 지표
+target_bad_a              booster가 사용하는 binary label
+```
+
+`eds_*`와 `sim_*` 컬럼은 결과/검증용 컬럼이라 booster feature에서 제외합니다.
+
+Toy dataset으로 booster를 실행하려면:
+
+```powershell
+python examples/run_feature_booster_on_toyset.py
+```
+
+결과 CSV는 아래 폴더에 저장됩니다.
+
+```text
+outputs/toy_semiconductor_booster/
+```
+
+## Wide toyset, 10,000+ features per order
+
+좀 더 실제 상황에 가깝게 order별 1만 개 이상의 candidate feature를 만들고 싶으면 wide toyset을 사용합니다.
+
+기본값은 다음과 같습니다.
+
+```text
+orders: 3
+rows per order: 240
+generated candidate features per order: 10,000
+```
+
+생성:
+
+```powershell
+python examples/generate_wide_toy_semiconductor_dataset.py
+```
+
+실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py
+```
+
+생성 데이터 위치:
+
+```text
+data/toy_semiconductor_wide/
+```
+
+결과 위치:
+
+```text
+outputs/wide_toy_semiconductor_booster/
+```
+
+PC가 느리면 feature 수를 줄여 먼저 테스트할 수 있습니다.
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 --rows 120 --features-per-order 1000
+```
+
+다시 1만 feature로 돌리려면:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 2 3 --rows 240 --features-per-order 10000
+```
+
+CatBoost SHAP probe까지 켜려면 `catboost`를 설치한 뒤 `--catboost` 옵션을 붙입니다.
+
+```powershell
+python -m pip install catboost
+python examples/run_feature_booster_on_wide_toyset.py --catboost
+```
+
+VS Code에서 노트북으로 보고 싶으면 아래 파일을 엽니다.
+
+```text
+notebooks/feature_booster_wide_toyset.ipynb
+```
+
+## Visual review dashboard
+
+랭킹 결과가 진짜 좋은지 확인하려면 feature별 plot을 봐야 합니다.
+
+아래 노트북을 열면 top feature별로 scatter, Good/Bad boxplot, 설비별 분포, missingness plot을 확인할 수 있습니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+plot에 필요한 패키지:
+
+```powershell
+python -m pip install matplotlib
+```
+
+기본 설정은 wide toyset 결과를 봅니다.
+
+```text
+DATA_DIR = data/toy_semiconductor_wide
+RESULT_PATH = outputs/wide_toy_semiconductor_booster/combined_feature_evidence.csv
+Y_COL = eds_bin_a_wf_mean
+FACET_COL = equipment_name
+```
+
+## Realistic wide toyset update
+
+Wide toyset은 이제 order별 전체 wafer pool을 먼저 만든 뒤, 그 안에서 booster용 Good/Bad 샘플만 발췌합니다.
+
+기본값:
+
+```text
+full wafer rows per order: 2,500
+booster Good rows per order: 180
+booster Bad rows per order: 70
+candidate features per order: 10,000
+```
+
+생성되는 파일:
+
+```text
+data/toy_semiconductor_wide/wide_order_001_full_pool.csv  # 전체 wafer pool
+data/toy_semiconductor_wide/wide_order_001.csv            # booster 입력용 Good/Bad slice
+```
+
+기본 실행:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate
+```
+
+빠른 테스트:
+
+```powershell
+python examples/run_feature_booster_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000
+```
+
+시각 검증은 아래 노트북에서 합니다.
+
+```text
+notebooks/feature_review_dashboard.ipynb
+```
+
+Visual review dashboard의 main scatter/boxplot은 full pool 파일을 읽어서 `Ignored`, `Good`, `Bad`를 함께 보여줍니다. 별도의 process sequence plot에서는 특정 기간에 sensor feature가 튀고 그 구간에서 Bad가 많이 나오는지도 확인할 수 있습니다.
+
+## Alternative selector comparison
+
+기존 evidence booster와 다른 방식의 selector를 같은 toyset에서 비교할 수 있습니다.
+
+추가된 방식:
+
+```text
+nonparametric_random  Mann-Whitney/KS/chi-square/presence test 후 p-value <= 0.05 pool에서 weighted random top-k
+distance              Good/Bad 분포 거리 기반 ranking
+catboost_shap_gap     CatBoost SHAP의 Bad 평균과 Good 평균 차이가 큰 feature ranking
+stability_consensus   bootstrap 반복에서 계속 상위권에 남는 feature ranking
+```
+
+이 스크립트는 selector별로 order당 `--top-k`개 feature를 먼저 고른 뒤, 모든 order의 선택 결과를 method별로 합칩니다. 그 다음 모든 order의 Good/Bad rows를 합쳐 method별 global CatBoost를 한 번씩 학습하고, `abs(mean SHAP Bad - mean SHAP Good)` 기준 top feature를 산출합니다. 기본값은 order/method당 15개 선발, global SHAP delta top 15개 리포트입니다.
+
+빠른 테스트:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate --orders 1 --rows 600 --booster-good-rows 80 --booster-bad-rows 30 --features-per-order 1000 --top-k 15 --shap-top-n 15 --stability-rounds 2
+```
+
+기본 크기 실행:
+
+```powershell
+python examples/run_selector_comparison_on_wide_toyset.py --regenerate
+```
+
+VS Code/Jupyter에서 표와 plot을 보면서 실행하려면 아래 노트북을 여세요.
+
+```text
+notebooks/selector_catboost_shap_review.ipynb
+```
+
+결과 파일:
+
+```text
+outputs/wide_toy_selector_comparison/combined_selector_comparison.csv
+outputs/wide_toy_selector_comparison/method_overlap_jaccard.csv
+outputs/wide_toy_selector_comparison/selector_comparison_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_top_features.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_model_metrics_by_method.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_shap_delta_toy_truth_summary.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/catboost_global_method_scoreboard.csv
+outputs/wide_toy_selector_comparison/catboost_post_eval/plots/
+```
+
+Toyset은 synthetic planted feature를 알고 있으므로, `*_toy_truth_summary.csv`에서 method별 정답 대용 평가를 볼 수 있습니다.
+
+```text
+target_defect_a_precision   선택 feature 중 실제 심어둔 A 관련 feature 비율
+nonlinear_a_hit_count       nonlinear/interaction A feature를 잡은 개수
+sparse_a_hit_count          one-sided sparse A feature를 잡은 개수
+other_defect_hit_count      B/C/D 등 다른 불량 feature를 잡은 개수
+tool_confounded_hit_count   tool confounding feature를 잡은 개수
+noise_hit_count             noise feature를 잡은 개수
+toy_truth_score             A hit reward - non-A/noise/confound penalty 요약 점수
+```
+
+`catboost_shap_gap`을 실제 SHAP 기준으로 쓰려면 CatBoost가 필요합니다.
+
+```powershell
+python -m pip install catboost
+```
+
+CatBoost가 설치되어 있지 않으면 post-evaluation은 CSV에 `catboost_not_installed` 경고를 남기고 종료합니다. Plot은 `matplotlib`이 필요합니다.
+
+
+====================================================================================================
+FILE: requirements.txt
+====================================================================================================
+pandas
+numpy
+scikit-learn
+catboost
+shap
+pyyaml
+tqdm
+joblib
+matplotlib
+
+
+====================================================================================================
+FILE: configs/experiment.yaml
+====================================================================================================
+run_id: "yield_residual_boosting_poc_001"
+
+paths:
+  base_dataset: "data/base_dataset.parquet"
+  candidate_features: "data/candidate_features.parquet"
+  base_feature_cols: "data/base_feature_cols.txt"
+  output_dir: "outputs"
+
+columns:
+  id_col: "sample_id"
+  target_col: "yield"
+  split_col: "split"
+
+defects:
+  - defect_id: "defect_1"
+    bad_group_path: "data/groups/defect_1_bad.csv"
+    good_group_path: "data/groups/defect_1_good.csv"
+  - defect_id: "defect_2"
+    bad_group_path: "data/groups/defect_2_bad.csv"
+    good_group_path: "data/groups/defect_2_good.csv"
+  - defect_id: "defect_3"
+    bad_group_path: "data/groups/defect_3_bad.csv"
+    good_group_path: "data/groups/defect_3_good.csv"
+
+baseline_model:
+  iterations: 3000
+  depth: 6
+  learning_rate: 0.03
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 100
+  verbose: 200
+
+residual_model:
+  iterations: 300
+  depth: 3
+  learning_rate: 0.05
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 30
+  verbose: false
+  thread_count: 1
+
+feature_filter:
+  max_missing_rate: 0.5
+  min_unique_values: 2
+  min_bad_coverage: 0.7
+  min_good_coverage: 0.7
+
+boosting:
+  n_rounds: 5
+  select_per_round: 1
+  main_metric: "bad_rmse_reduction"
+  min_improvement: 0.0
+  use_test_for_selection: false
+  min_valid_bad_samples: 1
+  show_progress: true
+  progress_every: 100
+
+final_model:
+  iterations: 3000
+  depth: 6
+  learning_rate: 0.03
+  loss_function: "RMSE"
+  eval_metric: "RMSE"
+  random_seed: 42
+  early_stopping_rounds: 100
+  verbose: 200
+
+shap:
+  enabled: true
+  max_samples: 5000
+
+
+====================================================================================================
+FILE: feature_boosting/__init__.py
+====================================================================================================
+"""Residual-based CatBoost feature boosting PoC."""
+
+from .baseline_model import predict_baseline, train_baseline_model
+from .config import ExperimentConfig, load_config
+from .final_model import evaluate_model_by_groups, train_final_model
+from .metrics import mae, r2, rmse
+from .residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
+
+__all__ = [
+    "ExperimentConfig",
+    "ResidualFeatureBooster",
+    "ResidualFeatureBoosterConfig",
+    "evaluate_model_by_groups",
+    "load_config",
+    "mae",
+    "predict_baseline",
+    "r2",
+    "rmse",
+    "train_baseline_model",
+    "train_final_model",
+]
+
+
+====================================================================================================
+FILE: feature_boosting/baseline_model.py
+====================================================================================================
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+
+from .metrics import regression_metrics
+from .modeling import fit_regressor, predict_regressor
+
+
+def train_baseline_model(
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    feature_cols: list[str],
+    target_col: str,
+    catboost_params: dict | None = None,
+):
+    return fit_regressor(
+        train_df,
+        train_df[target_col].to_numpy(dtype=float),
+        valid_df,
+        valid_df[target_col].to_numpy(dtype=float),
+        feature_cols,
+        catboost_params,
+    )
+
+
+def predict_baseline(model, df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+    return predict_regressor(model, df, feature_cols)
+
+
+def add_baseline_predictions(
+    model,
+    df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    target_col: str,
+    pred_col: str = "baseline_pred",
+    residual_col: str = "baseline_residual",
+) -> pd.DataFrame:
+    result = df.copy()
+    pred = predict_baseline(model, result, feature_cols)
+    result[pred_col] = pred
+    result[residual_col] = result[target_col].to_numpy(dtype=float) - pred
+    return result
+
+
+def metrics_by_split(df: pd.DataFrame, *, target_col: str, pred_col: str, split_col: str) -> pd.DataFrame:
+    rows = []
+    for split, group in df.groupby(split_col, sort=False):
+        row = {"split": split, "n_samples": len(group)}
+        row.update(regression_metrics(group[target_col], group[pred_col]))
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+====================================================================================================
+FILE: feature_boosting/cli.py
+====================================================================================================
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import pandas as pd
+
+from .baseline_model import add_baseline_predictions, metrics_by_split, train_baseline_model
+from .config import load_config
+from .data_loader import (
+    align_base_and_candidates,
+    candidate_feature_cols,
+    load_base_dataset,
+    load_base_feature_cols,
+    load_candidate_features,
+    load_group_ids,
+)
+from .final_model import evaluate_model_by_groups, predict_final, train_final_model
+from .reporting import (
+    baseline_residual_summary,
+    copy_config,
+    final_metric_summary,
+    plot_candidate_loss_ranking,
+    plot_final_feature_set_summary,
+    plot_final_metric_comparison,
+    plot_residual_curve,
+    plot_round_residual_points,
+    prepare_output_dir,
+    round_residual_summary,
+    setup_logger,
+    write_csv,
+)
+from .residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
+from .shap_analysis import compute_shap_summary
+from .splitter import split_frame
+from .validation import profile_candidate_features, validate_defect_groups, validate_input_columns
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Run residual-based feature boosting PoC.")
+    parser.add_argument("--config", required=True, help="Path to experiment YAML/JSON config.")
+    args = parser.parse_args(argv)
+    return run_experiment(Path(args.config))
+
+
+def run_experiment(config_path: Path) -> int:
+    config = load_config(config_path)
+    output_dir = prepare_output_dir(config.paths.output_dir, config.run_id)
+    logger = setup_logger(output_dir)
+    copy_config(config_path, output_dir)
+
+    paths = config.paths
+    cols = config.columns
+
+    logger.info("[LOAD] loading base dataset")
+    base_df = load_base_dataset(_resolve_path(paths.base_dataset))
+    logger.info("[LOAD] base dataset loaded: n_rows=%s, n_cols=%s", len(base_df), len(base_df.columns))
+
+    logger.info("[LOAD] loading candidate features")
+    candidate_df = load_candidate_features(_resolve_path(paths.candidate_features))
+    candidate_cols = candidate_feature_cols(candidate_df, cols.id_col)
+    logger.info("[LOAD] candidate features loaded: n_features=%s", len(candidate_cols))
+
+    base_feature_cols = load_base_feature_cols(_resolve_path(paths.base_feature_cols))
+    validate_input_columns(
+        base_df,
+        candidate_df,
+        base_feature_cols,
+        id_col=cols.id_col,
+        target_col=cols.target_col,
+        split_col=cols.split_col,
+    )
+    all_df = align_base_and_candidates(base_df, candidate_df, cols.id_col)
+    train_df, valid_df, test_df = split_frame(all_df, cols.split_col)
+
+    defect_groups: dict[str, dict[str, set[str]]] = {}
+    for defect in config.defects:
+        bad_ids = load_group_ids(_resolve_path(defect.bad_group_path), cols.id_col)
+        good_ids = load_group_ids(_resolve_path(defect.good_group_path), cols.id_col)
+        warnings = validate_defect_groups(
+            defect.defect_id,
+            bad_ids,
+            good_ids,
+            all_df,
+            id_col=cols.id_col,
+            split_col=cols.split_col,
+            min_valid_bad_samples=config.boosting.min_valid_bad_samples,
+        )
+        logger.info("[DEFECT %s] bad n=%s, good n=%s%s", defect.defect_id, len(bad_ids), len(good_ids), _warn_suffix(warnings))
+        defect_groups[defect.defect_id] = {"bad": bad_ids, "good": good_ids, "warnings": set(warnings)}
+
+    logger.info("[BASELINE] training started")
+    baseline_model = train_baseline_model(train_df, valid_df, base_feature_cols, cols.target_col, config.baseline_model)
+    all_df = add_baseline_predictions(
+        baseline_model,
+        all_df,
+        feature_cols=base_feature_cols,
+        target_col=cols.target_col,
+    )
+    train_df, valid_df, test_df = split_frame(all_df, cols.split_col)
+    baseline_metrics = metrics_by_split(all_df, target_col=cols.target_col, pred_col="baseline_pred", split_col=cols.split_col)
+    write_csv(baseline_metrics, output_dir / "baseline_metrics.csv")
+    baseline_summary = baseline_residual_summary(
+        all_df,
+        target_col=cols.target_col,
+        pred_col="baseline_pred",
+        residual_col="baseline_residual",
+        split_col=cols.split_col,
+        id_col=cols.id_col,
+        defects=defect_groups,
+    )
+    write_csv(
+        baseline_summary,
+        output_dir / "baseline_residual_summary.csv",
+    )
+    valid_rmse = baseline_metrics.loc[baseline_metrics["split"].astype(str) == "valid", "rmse"]
+    logger.info("[BASELINE] valid RMSE: %s", round(float(valid_rmse.iloc[0]), 6) if not valid_rmse.empty else "nan")
+    _save_model(baseline_model, output_dir / "models" / "baseline_model.cbm")
+
+    quality_frames: list[pd.DataFrame] = []
+    selected_frames: list[pd.DataFrame] = []
+    curve_frames: list[pd.DataFrame] = []
+    booster = ResidualFeatureBooster(
+        ResidualFeatureBoosterConfig(
+            residual_model_params=config.residual_model,
+            n_rounds=config.boosting.n_rounds,
+            select_per_round=config.boosting.select_per_round,
+            main_metric=config.boosting.main_metric,
+            min_improvement=config.boosting.min_improvement,
+            use_test_for_selection=config.boosting.use_test_for_selection,
+            min_valid_bad_samples=config.boosting.min_valid_bad_samples,
+            show_progress=config.boosting.show_progress,
+            progress_every=config.boosting.progress_every,
+        )
+    )
+
+    for defect in config.defects:
+        groups = defect_groups[defect.defect_id]
+        quality = profile_candidate_features(
+            all_df,
+            candidate_cols,
+            id_col=cols.id_col,
+            split_col=cols.split_col,
+            bad_ids=groups["bad"],
+            good_ids=groups["good"],
+            config=config.feature_filter,
+            protected_cols={cols.id_col, cols.target_col, cols.split_col, *base_feature_cols},
+        )
+        quality.insert(0, "defect_id", defect.defect_id)
+        quality_frames.append(quality)
+        if any(str(item).startswith("low_valid_bad_samples") for item in groups.get("warnings", set())):
+            logger.info("[BOOST %s] skipped: low valid bad sample count", defect.defect_id)
+            continue
+        logger.info("[BOOST %s round 1] scoring candidates: %s", defect.defect_id, len(candidate_cols))
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=candidate_cols,
+            target_col=cols.target_col,
+            id_col=cols.id_col,
+            baseline_pred_col="baseline_pred",
+            defect_id=defect.defect_id,
+            bad_sample_ids=groups["bad"],
+            good_sample_ids=groups["good"],
+            quality_summary=quality,
+            output_dir=output_dir / "rankings",
+        )
+        for ranking_df in result.rankings:
+            if ranking_df.empty or "round" not in ranking_df.columns:
+                continue
+            round_no = int(ranking_df["round"].max())
+            plot_candidate_loss_ranking(
+                ranking_df,
+                output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
+                global_metric_col="valid_global_rmse_after",
+                bad_metric_col="valid_bad_rmse_after",
+                title_prefix=f"{defect.defect_id} round {round_no}",
+            )
+        if not result.selected_features.empty:
+            selected_frames.append(result.selected_features)
+            first = result.selected_features.iloc[0]
+            logger.info(
+                "[BOOST %s round %s] selected feature: %s, valid_bad_rmse_reduction=%s",
+                defect.defect_id,
+                first["round"],
+                first["feature_name"],
+                round(float(first["valid_bad_rmse_reduction"]), 6),
+            )
+        if not result.residual_curve.empty:
+            curve_frames.append(result.residual_curve)
+
+    quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
+    selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
+    residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+    write_csv(quality_summary, output_dir / "candidate_quality_summary.csv")
+    write_csv(selected_features, output_dir / "selected_features.csv")
+    write_csv(residual_curve, output_dir / "residual_reduction_curve.csv")
+    plot_residual_curve(residual_curve, output_dir)
+    round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+    write_csv(round_mean_residual, output_dir / "round_mean_residual_summary.csv")
+    plot_round_residual_points(round_mean_residual, output_path=output_dir / "plots" / "round_mean_abs_residual_points.png")
+
+    selected_cols = _unique_selected_features(selected_features, candidate_cols)
+    final_feature_cols = base_feature_cols + selected_cols
+    final_feature_summary = pd.DataFrame(
+        [
+            {"feature_type": "base", "count": len(base_feature_cols)},
+            {"feature_type": "selected", "count": len(selected_cols)},
+        ]
+    )
+    write_csv(final_feature_summary, output_dir / "final_feature_set_summary.csv")
+    plot_final_feature_set_summary(final_feature_summary, output_path=output_dir / "plots" / "final_feature_set_summary.png")
+    logger.info("[FINAL] training final model with n_selected=%s", len(selected_cols))
+    final_params = config.final_model or config.baseline_model
+    final_model = train_final_model(train_df, valid_df, feature_cols=final_feature_cols, target_col=cols.target_col, catboost_params=final_params)
+    all_df["final_pred"] = predict_final(final_model, all_df, final_feature_cols)
+    _save_model(final_model, output_dir / "models" / "final_model.cbm")
+    final_metrics = pd.concat(
+        [
+            evaluate_model_by_groups(
+                all_df,
+                model_name="baseline",
+                pred_col="baseline_pred",
+                target_col=cols.target_col,
+                split_col=cols.split_col,
+                id_col=cols.id_col,
+                defects=defect_groups,
+            ),
+            evaluate_model_by_groups(
+                all_df,
+                model_name="final",
+                pred_col="final_pred",
+                target_col=cols.target_col,
+                split_col=cols.split_col,
+                id_col=cols.id_col,
+                defects=defect_groups,
+            ),
+        ],
+        ignore_index=True,
+    )
+    write_csv(final_metrics, output_dir / "final_model_metrics.csv")
+    final_metric_summary_df = final_metric_summary(final_metrics)
+    write_csv(final_metric_summary_df, output_dir / "final_model_metric_summary.csv")
+    plot_final_metric_comparison(final_metric_summary_df, output_path=output_dir / "plots" / "final_model_metric_comparison.png")
+
+    if config.shap.enabled:
+        logger.info("[SHAP] calculating SHAP summary")
+        shap_summary = compute_shap_summary(
+            final_model,
+            all_df[all_df[cols.split_col].astype(str) == "test"],
+            feature_cols=final_feature_cols,
+            id_col=cols.id_col,
+            defects=defect_groups,
+            selected_features=selected_features,
+            max_samples=config.shap.max_samples,
+        )
+    else:
+        shap_summary = pd.DataFrame([{"status": "disabled"}])
+    write_csv(shap_summary, output_dir / "shap_summary.csv")
+    logger.info("[DONE] outputs saved to %s", output_dir)
+    return 0
+
+
+def _resolve_path(path: str) -> Path:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        return candidate
+    return Path.cwd() / candidate
+
+
+def _save_model(model, path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if hasattr(model, "save_model"):
+        try:
+            model.save_model(path)
+            return
+        except TypeError:
+            model.save_model(str(path))
+
+
+def _unique_selected_features(selected_features: pd.DataFrame, candidate_cols: list[str]) -> list[str]:
+    if selected_features.empty or "feature_name" not in selected_features.columns:
+        return []
+    available = set(candidate_cols)
+    result = []
+    for feature in selected_features["feature_name"].dropna().astype(str):
+        if feature in available and feature not in result:
+            result.append(feature)
+    return result
+
+
+def _warn_suffix(warnings: list[str]) -> str:
+    return f", warnings={warnings}" if warnings else ""
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+====================================================================================================
+FILE: feature_boosting/config.py
+====================================================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+@dataclass(frozen=True)
+class PathConfig:
+    base_dataset: str
+    candidate_features: str
+    base_feature_cols: str
+    output_dir: str = "outputs"
+
+
+@dataclass(frozen=True)
+class ColumnConfig:
+    id_col: str = "sample_id"
+    target_col: str = "yield"
+    split_col: str = "split"
+
+
+@dataclass(frozen=True)
+class DefectConfig:
+    defect_id: str
+    bad_group_path: str
+    good_group_path: str
+
+
+@dataclass(frozen=True)
+class FeatureFilterConfig:
+    max_missing_rate: float = 0.5
+    min_unique_values: int = 2
+    min_bad_coverage: float = 0.7
+    min_good_coverage: float = 0.7
+
+
+@dataclass(frozen=True)
+class BoostingConfig:
+    n_rounds: int = 5
+    select_per_round: int = 1
+    main_metric: str = "valid_bad_rmse_reduction"
+    min_improvement: float = 0.0
+    use_test_for_selection: bool = False
+    min_valid_bad_samples: int = 1
+    show_progress: bool = True
+    progress_every: int = 100
+
+
+@dataclass(frozen=True)
+class ShapConfig:
+    enabled: bool = True
+    max_samples: int = 5000
+
+
+@dataclass(frozen=True)
+class ExperimentConfig:
+    run_id: str
+    paths: PathConfig
+    columns: ColumnConfig = field(default_factory=ColumnConfig)
+    defects: tuple[DefectConfig, ...] = ()
+    baseline_model: dict[str, Any] = field(default_factory=dict)
+    residual_model: dict[str, Any] = field(default_factory=dict)
+    feature_filter: FeatureFilterConfig = field(default_factory=FeatureFilterConfig)
+    boosting: BoostingConfig = field(default_factory=BoostingConfig)
+    final_model: dict[str, Any] = field(default_factory=dict)
+    shap: ShapConfig = field(default_factory=ShapConfig)
+
+
+def load_config(path: str | Path) -> ExperimentConfig:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"config file not found: {path}")
+    data = _read_mapping(path)
+    return config_from_mapping(data)
+
+
+def config_from_mapping(data: dict[str, Any]) -> ExperimentConfig:
+    return ExperimentConfig(
+        run_id=str(data.get("run_id", "yield_residual_boosting_poc")),
+        paths=PathConfig(**data.get("paths", {})),
+        columns=ColumnConfig(**data.get("columns", {})),
+        defects=tuple(DefectConfig(**item) for item in data.get("defects", [])),
+        baseline_model=dict(data.get("baseline_model", {})),
+        residual_model=dict(data.get("residual_model", {})),
+        feature_filter=FeatureFilterConfig(**data.get("feature_filter", {})),
+        boosting=BoostingConfig(**data.get("boosting", {})),
+        final_model=dict(data.get("final_model", {})),
+        shap=ShapConfig(**data.get("shap", {})),
+    )
+
+
+def _read_mapping(path: Path) -> dict[str, Any]:
+    suffix = path.suffix.lower()
+    if suffix == ".json":
+        import json
+
+        return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        import yaml
+    except Exception as exc:
+        raise RuntimeError(
+            "PyYAML is required for YAML configs. Install dependencies from requirements.txt "
+            "or use a .json config."
+        ) from exc
+    with path.open("r", encoding="utf-8") as handle:
+        loaded = yaml.safe_load(handle)
+    if not isinstance(loaded, dict):
+        raise ValueError(f"config must be a mapping: {path}")
+    return loaded
+
+
+====================================================================================================
+FILE: feature_boosting/data_loader.py
+====================================================================================================
+from __future__ import annotations
+
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+
+def read_table(path: str | Path) -> pd.DataFrame:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"input file not found: {path}")
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        return pd.read_csv(path)
+    if suffix in {".parquet", ".pq"}:
+        return pd.read_parquet(path)
+    if suffix in {".tsv", ".txt"}:
+        return pd.read_csv(path, sep="\t")
+    raise ValueError(f"unsupported table format: {path}")
+
+
+def load_base_dataset(path: str | Path) -> pd.DataFrame:
+    return read_table(path)
+
+
+def load_candidate_features(path: str | Path) -> pd.DataFrame:
+    return read_table(path)
+
+
+def load_base_feature_cols(path: str | Path) -> list[str]:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"base feature column file not found: {path}")
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def load_group_ids(path: str | Path, id_col: str) -> set[str]:
+    frame = read_table(path)
+    if id_col not in frame.columns:
+        raise ValueError(f"group file {path} must contain id column {id_col!r}")
+    return set(frame[id_col].dropna().astype(str))
+
+
+def align_base_and_candidates(base_df: pd.DataFrame, candidate_df: pd.DataFrame, id_col: str) -> pd.DataFrame:
+    if id_col not in base_df.columns:
+        raise ValueError(f"base dataset is missing id column {id_col!r}")
+    if id_col not in candidate_df.columns:
+        raise ValueError(f"candidate features are missing id column {id_col!r}")
+    base = base_df.copy()
+    candidate = candidate_df.copy()
+    base[id_col] = base[id_col].astype(str)
+    candidate[id_col] = candidate[id_col].astype(str)
+    merged = base.merge(candidate, on=id_col, how="inner", suffixes=("", "__candidate_dup"))
+    if merged.empty:
+        raise ValueError(f"base dataset and candidate features do not match on {id_col!r}")
+    duplicate_cols = [col for col in merged.columns if col.endswith("__candidate_dup")]
+    if duplicate_cols:
+        merged = merged.drop(columns=duplicate_cols)
+    return merged
+
+
+def candidate_feature_cols(candidate_df: pd.DataFrame, id_col: str) -> list[str]:
+    return [col for col in candidate_df.columns if col != id_col]
+
+
+def standardize_six_file_inputs(
+    *,
+    y_path: str | Path,
+    candidate_path: str | Path,
+    base_feature_path: str | Path,
+    defect_groups: list[dict[str, Any]],
+    output_dir: str | Path,
+    id_col: str = "sample_id",
+    target_col: str = "yield",
+    split_col: str = "split",
+    y_lot_col: str = "lot",
+    y_wf_col: str = "wf",
+    y_target_col: str = "y",
+    candidate_lot_col: str = "lot",
+    candidate_wf_col: str = "wf",
+    base_lot_col: str = "lot",
+    base_wf_col: str = "wf",
+    split_source_col: str | None = None,
+    train_ratio: float = 0.6,
+    valid_ratio: float = 0.2,
+    split_seed: int = 42,
+) -> dict[str, Any]:
+    """Convert raw lot/wf/y + base/candidate + good_bad files to PoC inputs.
+
+    Expected raw inputs:
+    1. y file: lot/wf/y columns
+    2. candidate file: lot/wf/candidate feature columns
+    3. base feature file: lot/wf/base feature columns
+    4. one group file per defect: lot/wf/good_bad columns
+
+    Column names are configurable. The standardized output uses the existing
+    pipeline contract: sample_id, yield, split, base feature columns,
+    candidate feature table, base_feature_cols.txt, and bad/good CSVs.
+    """
+    output_dir = Path(output_dir)
+    group_out_dir = output_dir / "groups"
+    group_out_dir.mkdir(parents=True, exist_ok=True)
+
+    y_df = _with_sample_id(read_table(y_path), lot_col=y_lot_col, wf_col=y_wf_col, id_col=id_col)
+    candidate_df = _with_sample_id(read_table(candidate_path), lot_col=candidate_lot_col, wf_col=candidate_wf_col, id_col=id_col)
+    base_feature_df = _with_sample_id(read_table(base_feature_path), lot_col=base_lot_col, wf_col=base_wf_col, id_col=id_col)
+
+    if y_target_col not in y_df.columns:
+        raise ValueError(f"y file is missing target column {y_target_col!r}")
+    y_keep = [id_col, y_target_col]
+    if split_source_col:
+        if split_source_col not in y_df.columns:
+            raise ValueError(f"y file is missing split source column {split_source_col!r}")
+        y_keep.append(split_source_col)
+    y_std = y_df[y_keep].rename(columns={y_target_col: target_col})
+
+    base_cols = _feature_columns(base_feature_df, id_col=id_col, key_cols={base_lot_col, base_wf_col})
+    base_std = y_std.merge(base_feature_df[[id_col] + base_cols], on=id_col, how="inner")
+    if base_std.empty:
+        raise ValueError("y file and base feature file do not match on lot/wf sample_id")
+
+    if split_source_col and split_source_col in base_std.columns:
+        base_std[split_col] = base_std[split_source_col].astype(str).str.lower()
+        base_std = base_std.drop(columns=[split_source_col])
+    else:
+        lot_lookup = y_df[[id_col, y_lot_col]].drop_duplicates()
+        base_std = base_std.merge(lot_lookup, on=id_col, how="left")
+        base_std[split_col] = _make_split(base_std[y_lot_col], train_ratio=train_ratio, valid_ratio=valid_ratio, seed=split_seed)
+        base_std = base_std.drop(columns=[y_lot_col])
+
+    candidate_cols = _feature_columns(candidate_df, id_col=id_col, key_cols={candidate_lot_col, candidate_wf_col})
+    candidate_std = candidate_df[[id_col] + candidate_cols].copy()
+    candidate_std, candidate_cols = _rename_overlapping_candidate_cols(
+        candidate_std,
+        candidate_cols=candidate_cols,
+        protected_cols={id_col, target_col, split_col, *base_cols},
+    )
+
+    base_dataset_path = output_dir / "base_dataset.csv"
+    candidate_features_path = output_dir / "candidate_features.csv"
+    base_feature_cols_path = output_dir / "base_feature_cols.txt"
+    base_std.to_csv(base_dataset_path, index=False, encoding="utf-8-sig")
+    candidate_std.to_csv(candidate_features_path, index=False, encoding="utf-8-sig")
+    base_feature_cols_path.write_text("\n".join(base_cols) + "\n", encoding="utf-8")
+
+    standardized_defects = []
+    for spec in defect_groups:
+        defect_id = str(spec["defect_id"])
+        group_path = spec["group_path"]
+        lot_col = spec.get("lot_col", "lot")
+        wf_col = spec.get("wf_col", "wf")
+        label_col = spec.get("label_col", "good_bad")
+        bad_value = str(spec.get("bad_value", "bad")).strip().lower()
+        good_value = str(spec.get("good_value", "good")).strip().lower()
+
+        group_df = _with_sample_id(read_table(group_path), lot_col=lot_col, wf_col=wf_col, id_col=id_col)
+        if label_col not in group_df.columns:
+            raise ValueError(f"group file {group_path} is missing label column {label_col!r}")
+        labels = group_df[label_col].astype(str).str.strip().str.lower()
+        bad = group_df.loc[labels == bad_value, [id_col]].drop_duplicates()
+        good = group_df.loc[labels == good_value, [id_col]].drop_duplicates()
+        bad_path = group_out_dir / f"{defect_id}_bad.csv"
+        good_path = group_out_dir / f"{defect_id}_good.csv"
+        bad.to_csv(bad_path, index=False, encoding="utf-8-sig")
+        good.to_csv(good_path, index=False, encoding="utf-8-sig")
+        standardized_defects.append(
+            {
+                "defect_id": defect_id,
+                "bad_group_path": bad_path,
+                "good_group_path": good_path,
+            }
+        )
+
+    return {
+        "base_dataset": base_dataset_path,
+        "candidate_features": candidate_features_path,
+        "base_feature_cols": base_feature_cols_path,
+        "defects": standardized_defects,
+    }
+
+
+def _with_sample_id(df: pd.DataFrame, *, lot_col: str, wf_col: str, id_col: str) -> pd.DataFrame:
+    missing = [col for col in (lot_col, wf_col) if col not in df.columns]
+    if missing:
+        raise ValueError(f"input file is missing lot/wf columns: {missing}")
+    result = df.copy()
+    result[id_col] = result[lot_col].astype(str).str.strip() + "_" + result[wf_col].astype(str).str.strip()
+    return result
+
+
+def _feature_columns(df: pd.DataFrame, *, id_col: str, key_cols: set[str]) -> list[str]:
+    excluded = {id_col, *key_cols}
+    return [col for col in df.columns if col not in excluded]
+
+
+def _rename_overlapping_candidate_cols(
+    candidate_df: pd.DataFrame,
+    *,
+    candidate_cols: list[str],
+    protected_cols: set[str],
+) -> tuple[pd.DataFrame, list[str]]:
+    rename_map: dict[str, str] = {}
+    used_cols = set(candidate_df.columns)
+    for col in candidate_cols:
+        if col not in protected_cols:
+            continue
+        new_col = f"candidate__{col}"
+        counter = 2
+        while new_col in used_cols or new_col in protected_cols:
+            new_col = f"candidate__{counter}__{col}"
+            counter += 1
+        rename_map[col] = new_col
+        used_cols.add(new_col)
+
+    if not rename_map:
+        return candidate_df, candidate_cols
+
+    renamed = candidate_df.rename(columns=rename_map)
+    renamed_cols = [rename_map.get(col, col) for col in candidate_cols]
+    return renamed, renamed_cols
+
+
+def _make_split(lots: pd.Series, *, train_ratio: float, valid_ratio: float, seed: int) -> pd.Series:
+    if train_ratio <= 0 or valid_ratio <= 0 or train_ratio + valid_ratio >= 1:
+        raise ValueError("train_ratio and valid_ratio must be positive and leave a non-empty test split")
+    unique_lots = np.array(sorted(lots.astype(str).dropna().unique()))
+    if len(unique_lots) < 3:
+        raise ValueError("automatic train/valid/test split requires at least 3 unique lots")
+    rng = np.random.default_rng(seed)
+    rng.shuffle(unique_lots)
+    n_train = max(1, int(round(len(unique_lots) * train_ratio)))
+    n_valid = max(1, int(round(len(unique_lots) * valid_ratio)))
+    n_train = min(n_train, len(unique_lots) - 2)
+    n_valid = min(n_valid, len(unique_lots) - n_train - 1)
+    train_lots = set(unique_lots[:n_train])
+    valid_lots = set(unique_lots[n_train : n_train + n_valid])
+    values = lots.astype(str)
+    return pd.Series(
+        np.where(values.isin(train_lots), "train", np.where(values.isin(valid_lots), "valid", "test")),
+        index=lots.index,
+    )
+
+
+====================================================================================================
+FILE: feature_boosting/final_model.py
+====================================================================================================
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from .metrics import regression_metrics
+from .modeling import fit_regressor, predict_regressor
+
+
+def train_final_model(
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    target_col: str,
+    catboost_params: dict[str, Any] | None = None,
+):
+    return fit_regressor(
+        train_df,
+        train_df[target_col].to_numpy(dtype=float),
+        valid_df,
+        valid_df[target_col].to_numpy(dtype=float),
+        feature_cols,
+        catboost_params,
+    )
+
+
+def predict_final(model, df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+    return predict_regressor(model, df, feature_cols)
+
+
+def evaluate_model_by_groups(
+    df: pd.DataFrame,
+    *,
+    model_name: str,
+    pred_col: str,
+    target_col: str,
+    split_col: str,
+    id_col: str,
+    defects: dict[str, dict[str, set[str]]],
+) -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    for split, split_df in df.groupby(split_col, sort=False):
+        rows.append(_metric_row(model_name, "global", "global", split, split_df, target_col, pred_col))
+        ids = split_df[id_col].astype(str)
+        for defect_id, groups in defects.items():
+            bad_df = split_df[ids.isin(groups.get("bad", set()))]
+            good_df = split_df[ids.isin(groups.get("good", set()))]
+            rows.append(_metric_row(model_name, defect_id, "bad", split, bad_df, target_col, pred_col))
+            rows.append(_metric_row(model_name, defect_id, "good", split, good_df, target_col, pred_col))
+    return pd.DataFrame(rows)
+
+
+def _metric_row(
+    model_name: str,
+    defect_id: str,
+    group: str,
+    split: object,
+    frame: pd.DataFrame,
+    target_col: str,
+    pred_col: str,
+) -> dict[str, object]:
+    metrics = regression_metrics(frame[target_col], frame[pred_col]) if len(frame) else {"mae": np.nan, "rmse": np.nan, "r2": np.nan}
+    return {
+        "model_name": model_name,
+        "defect_id": defect_id,
+        "group": group,
+        "split": split,
+        "n_samples": len(frame),
+        **metrics,
+    }
+
+
+====================================================================================================
+FILE: feature_boosting/metrics.py
+====================================================================================================
+from __future__ import annotations
+
+import numpy as np
+
+
+def _finite_pair(y_true, y_pred) -> tuple[np.ndarray, np.ndarray]:
+    true = np.asarray(y_true, dtype=float)
+    pred = np.asarray(y_pred, dtype=float)
+    mask = np.isfinite(true) & np.isfinite(pred)
+    return true[mask], pred[mask]
+
+
+def mae(y_true, y_pred) -> float:
+    true, pred = _finite_pair(y_true, y_pred)
+    if true.size == 0:
+        return float("nan")
+    return float(np.mean(np.abs(true - pred)))
+
+
+def rmse(y_true, y_pred) -> float:
+    true, pred = _finite_pair(y_true, y_pred)
+    if true.size == 0:
+        return float("nan")
+    return float(np.sqrt(np.mean((true - pred) ** 2)))
+
+
+def r2(y_true, y_pred) -> float:
+    true, pred = _finite_pair(y_true, y_pred)
+    if true.size == 0:
+        return float("nan")
+    denom = float(np.sum((true - np.mean(true)) ** 2))
+    if denom <= 0:
+        return float("nan")
+    return float(1.0 - np.sum((true - pred) ** 2) / denom)
+
+
+def regression_metrics(y_true, y_pred) -> dict[str, float]:
+    return {"mae": mae(y_true, y_pred), "rmse": rmse(y_true, y_pred), "r2": r2(y_true, y_pred)}
+
+
+def reduction(before: float, after: float) -> float:
+    if not np.isfinite(before) or not np.isfinite(after):
+        return float("nan")
+    return float(before - after)
+
+
+def residual_reduction_metrics(y_true, pred_before, pred_after) -> dict[str, float]:
+    before_mae = mae(y_true, pred_before)
+    after_mae = mae(y_true, pred_after)
+    before_rmse = rmse(y_true, pred_before)
+    after_rmse = rmse(y_true, pred_after)
+    return {
+        "mae_before": before_mae,
+        "mae_after": after_mae,
+        "mae_reduction": reduction(before_mae, after_mae),
+        "rmse_before": before_rmse,
+        "rmse_after": after_rmse,
+        "rmse_reduction": reduction(before_rmse, after_rmse),
+    }
+
+
+====================================================================================================
+FILE: feature_boosting/modeling.py
+====================================================================================================
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+
+DEFAULT_CATBOOST_PARAMS: dict[str, Any] = {
+    "iterations": 3000,
+    "depth": 6,
+    "learning_rate": 0.03,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "random_seed": 42,
+    "early_stopping_rounds": 100,
+    "verbose": 200,
+}
+
+
+class NumpyRidgeRegressor:
+    """Small deterministic fallback used when CatBoost is unavailable."""
+
+    def __init__(self, l2: float = 1e-6):
+        self.l2 = float(l2)
+        self.columns_: list[str] = []
+        self.numeric_cols_: list[str] = []
+        self.categorical_cols_: list[str] = []
+        self.medians_: dict[str, float] = {}
+        self.dummy_columns_: list[str] = []
+        self.coef_: np.ndarray | None = None
+        self.backend = "numpy_ridge"
+
+    def fit(self, X: pd.DataFrame, y) -> "NumpyRidgeRegressor":
+        self.columns_ = list(X.columns)
+        self.numeric_cols_ = []
+        self.categorical_cols_ = []
+        for col in self.columns_:
+            converted = pd.to_numeric(X[col], errors="coerce")
+            non_null = int(X[col].notna().sum())
+            if non_null == 0 or converted.notna().sum() >= max(1, int(0.95 * non_null)):
+                self.numeric_cols_.append(col)
+                median = float(converted.median()) if converted.notna().any() else 0.0
+                self.medians_[col] = median
+            else:
+                self.categorical_cols_.append(col)
+        matrix = self._matrix(X, fit=True)
+        target = np.asarray(y, dtype=float)
+        mask = np.isfinite(target)
+        matrix = matrix[mask]
+        target = target[mask]
+        if matrix.shape[0] == 0:
+            raise ValueError("no finite target rows")
+        penalty = self.l2 * np.eye(matrix.shape[1])
+        penalty[0, 0] = 0.0
+        self.coef_ = np.linalg.pinv(matrix.T @ matrix + penalty) @ matrix.T @ target
+        return self
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        if self.coef_ is None:
+            raise RuntimeError("model is not fitted")
+        matrix = self._matrix(X, fit=False)
+        return matrix @ self.coef_
+
+    def save_model(self, path: str | Path) -> None:
+        path = Path(path)
+        payload = {
+            "backend": self.backend,
+            "columns": self.columns_,
+            "numeric_cols": self.numeric_cols_,
+            "categorical_cols": self.categorical_cols_,
+            "medians": self.medians_,
+            "dummy_columns": self.dummy_columns_,
+            "coef": self.coef_.tolist() if self.coef_ is not None else None,
+        }
+        path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+
+    def _matrix(self, X: pd.DataFrame, *, fit: bool) -> np.ndarray:
+        frame = pd.DataFrame(index=X.index)
+        for col in self.numeric_cols_:
+            values = pd.to_numeric(X[col], errors="coerce") if col in X.columns else pd.Series(np.nan, index=X.index)
+            frame[col] = values.fillna(self.medians_.get(col, 0.0)).astype(float)
+        if self.categorical_cols_:
+            cat = X.reindex(columns=self.categorical_cols_).astype("object").where(
+                X.reindex(columns=self.categorical_cols_).notna(), "__MISSING__"
+            )
+            dummies = pd.get_dummies(cat, columns=self.categorical_cols_, dummy_na=False, dtype=float)
+            if fit:
+                self.dummy_columns_ = list(dummies.columns)
+            dummies = dummies.reindex(columns=self.dummy_columns_, fill_value=0.0)
+            frame = pd.concat([frame, dummies], axis=1)
+        values = frame.to_numpy(dtype=float)
+        return np.column_stack([np.ones(len(frame), dtype=float), values])
+
+
+def fit_regressor(
+    train_df: pd.DataFrame,
+    y_train,
+    valid_df: pd.DataFrame | None,
+    y_valid,
+    feature_cols: list[str],
+    params: dict[str, Any] | None = None,
+):
+    params = dict(params or {})
+    backend = str(params.pop("backend", "auto")).lower()
+    if backend in {"numpy", "numpy_ridge", "linear"}:
+        return NumpyRidgeRegressor(l2=float(params.pop("l2", 1e-6))).fit(train_df[feature_cols], y_train)
+
+    try:
+        from catboost import CatBoostRegressor, Pool
+    except Exception:
+        if backend == "catboost":
+            raise RuntimeError("catboost is not installed") from None
+        return NumpyRidgeRegressor(l2=float(params.pop("l2", 1e-6))).fit(train_df[feature_cols], y_train)
+
+    model_params = dict(DEFAULT_CATBOOST_PARAMS)
+    model_params.update(params)
+    model_params.setdefault("allow_writing_files", False)
+    cat_features = _categorical_feature_indices(train_df[feature_cols])
+    train_pool = Pool(_prepare_catboost_frame(train_df[feature_cols]), y_train, cat_features=cat_features)
+    eval_set = None
+    if valid_df is not None and y_valid is not None:
+        eval_set = Pool(_prepare_catboost_frame(valid_df[feature_cols]), y_valid, cat_features=cat_features)
+    model = CatBoostRegressor(**model_params)
+    model.fit(train_pool, eval_set=eval_set, use_best_model=eval_set is not None)
+    model.backend = "catboost"
+    return model
+
+
+def predict_regressor(model, df: pd.DataFrame, feature_cols: list[str]) -> np.ndarray:
+    if getattr(model, "backend", "") == "catboost":
+        try:
+            from catboost import Pool
+        except Exception:
+            return np.asarray(model.predict(_prepare_catboost_frame(df[feature_cols])), dtype=float)
+        cat_features = _categorical_feature_indices(df[feature_cols])
+        return np.asarray(model.predict(Pool(_prepare_catboost_frame(df[feature_cols]), cat_features=cat_features)), dtype=float)
+    return np.asarray(model.predict(df[feature_cols]), dtype=float)
+
+
+def _categorical_feature_indices(frame: pd.DataFrame) -> list[int]:
+    return [
+        idx
+        for idx, col in enumerate(frame.columns)
+        if pd.api.types.is_object_dtype(frame[col]) or pd.api.types.is_categorical_dtype(frame[col])
+    ]
+
+
+def _prepare_catboost_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    prepared = frame.copy()
+    for col in prepared.columns:
+        if pd.api.types.is_object_dtype(prepared[col]) or pd.api.types.is_categorical_dtype(prepared[col]):
+            prepared[col] = prepared[col].astype("object").where(prepared[col].notna(), "__MISSING__")
+    return prepared
+
+
+====================================================================================================
+FILE: feature_boosting/reporting.py
+====================================================================================================
+from __future__ import annotations
+
+import json
+import logging
+import shutil
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from .metrics import mae, rmse
+
+
+def prepare_output_dir(base_output_dir: str | Path, run_id: str) -> Path:
+    output_dir = Path(base_output_dir) / run_id
+    for child in ("rankings", "plots", "models"):
+        (output_dir / child).mkdir(parents=True, exist_ok=True)
+    return output_dir
+
+
+def setup_logger(output_dir: Path) -> logging.Logger:
+    logger = logging.getLogger(f"feature_boosting.{output_dir.name}")
+    logger.setLevel(logging.INFO)
+    logger.handlers.clear()
+    formatter = logging.Formatter("%(message)s")
+    stream = logging.StreamHandler()
+    stream.setFormatter(formatter)
+    file_handler = logging.FileHandler(output_dir / "run.log", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(stream)
+    logger.addHandler(file_handler)
+    return logger
+
+
+def copy_config(config_path: str | Path, output_dir: Path) -> None:
+    shutil.copy2(config_path, output_dir / "config_used.yaml")
+
+
+def write_csv(frame: pd.DataFrame, path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    frame.to_csv(path, index=False, encoding="utf-8-sig")
+
+
+def write_json(data: dict[str, Any], path: str | Path) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def baseline_residual_summary(
+    df: pd.DataFrame,
+    *,
+    target_col: str,
+    pred_col: str,
+    residual_col: str,
+    split_col: str,
+    id_col: str,
+    defects: dict[str, dict[str, set[str]]],
+) -> pd.DataFrame:
+    rows = []
+    for split, split_df in df.groupby(split_col, sort=False):
+        rows.append(_residual_row("global", "global", split, split_df, target_col, pred_col, residual_col))
+        ids = split_df[id_col].astype(str)
+        for defect_id, groups in defects.items():
+            rows.append(
+                _residual_row(
+                    defect_id,
+                    "bad",
+                    split,
+                    split_df[ids.isin(groups.get("bad", set()))],
+                    target_col,
+                    pred_col,
+                    residual_col,
+                )
+            )
+            rows.append(
+                _residual_row(
+                    defect_id,
+                    "good",
+                    split,
+                    split_df[ids.isin(groups.get("good", set()))],
+                    target_col,
+                    pred_col,
+                    residual_col,
+                )
+            )
+    return pd.DataFrame(rows)
+
+
+def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
+    if curve.empty:
+        return
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return
+    for defect_id, group in curve.groupby("defect_id", sort=False):
+        fig, ax = plt.subplots(figsize=(8, 4))
+        ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
+        ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
+        ax.set_xlabel("round")
+        ax.set_ylabel("RMSE")
+        ax.set_title(f"{defect_id} residual curve")
+        ax.grid(alpha=0.25)
+        ax.legend()
+        fig.tight_layout()
+        fig.savefig(output_dir / "plots" / f"{defect_id}_residual_curve.png", dpi=150)
+        plt.close(fig)
+
+
+def round_residual_summary(
+    residual_curve: pd.DataFrame,
+    baseline_summary: pd.DataFrame,
+    *,
+    group: str = "bad",
+) -> pd.DataFrame:
+    """Build round-level mean absolute residual points.
+
+    Round 0 comes from the baseline residual summary. Later rounds come from
+    the selected-feature residual curve. The value is MAE, i.e.
+    mean(abs(y - prediction)), which is a stable "average residual" measure.
+    """
+    rows: list[dict[str, object]] = []
+    if baseline_summary is not None and not baseline_summary.empty:
+        base = baseline_summary[baseline_summary["group"].astype(str) == group].copy()
+        base = base[base["defect_id"].astype(str) != "global"]
+        for _, row in base.iterrows():
+            rows.append(
+                {
+                    "defect_id": row["defect_id"],
+                    "round": 0,
+                    "split": row["split"],
+                    "group": group,
+                    "selected_feature": "baseline",
+                    "mean_abs_residual": row.get("mean_abs_residual", np.nan),
+                }
+            )
+
+    if residual_curve is not None and not residual_curve.empty:
+        for _, row in residual_curve.iterrows():
+            for split in ("valid", "test"):
+                col = f"{split}_{group}_mae"
+                if col not in residual_curve.columns:
+                    continue
+                rows.append(
+                    {
+                        "defect_id": row["defect_id"],
+                        "round": int(row["round"]),
+                        "split": split,
+                        "group": group,
+                        "selected_feature": row.get("selected_feature", ""),
+                        "mean_abs_residual": row.get(col, np.nan),
+                    }
+                )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["mean_abs_residual"] = pd.to_numeric(result["mean_abs_residual"], errors="coerce")
+    return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
+
+
+def final_metric_summary(
+    final_metrics: pd.DataFrame,
+    *,
+    baseline_name: str = "baseline",
+    final_name: str = "final",
+) -> pd.DataFrame:
+    """Compare baseline and final metrics on the same split/defect/group rows."""
+    if final_metrics.empty:
+        return pd.DataFrame()
+    required = {"model_name", "defect_id", "group", "split"}
+    missing = sorted(required - set(final_metrics.columns))
+    if missing:
+        raise ValueError(f"final_metrics is missing required columns: {missing}")
+
+    id_cols = ["defect_id", "group", "split"]
+    metric_cols = [col for col in ("n_samples", "mae", "rmse", "r2") if col in final_metrics.columns]
+    baseline = (
+        final_metrics[final_metrics["model_name"].astype(str) == baseline_name][id_cols + metric_cols]
+        .copy()
+        .rename(columns={col: f"baseline_{col}" for col in metric_cols})
+    )
+    final = (
+        final_metrics[final_metrics["model_name"].astype(str) == final_name][id_cols + metric_cols]
+        .copy()
+        .rename(columns={col: f"final_{col}" for col in metric_cols})
+    )
+    summary = baseline.merge(final, on=id_cols, how="outer")
+    if summary.empty:
+        return summary
+
+    if "baseline_n_samples" in summary.columns or "final_n_samples" in summary.columns:
+        summary["n_samples"] = summary.get("final_n_samples", pd.Series(index=summary.index, dtype=float)).combine_first(
+            summary.get("baseline_n_samples", pd.Series(index=summary.index, dtype=float))
+        )
+
+    for metric in ("rmse", "mae"):
+        before_col = f"baseline_{metric}"
+        after_col = f"final_{metric}"
+        if before_col not in summary.columns or after_col not in summary.columns:
+            continue
+        before = pd.to_numeric(summary[before_col], errors="coerce")
+        after = pd.to_numeric(summary[after_col], errors="coerce")
+        reduction = before - after
+        summary[f"{metric}_reduction"] = reduction
+        summary[f"{metric}_reduction_pct"] = np.where(before.abs() > 0, 100.0 * reduction / before, np.nan)
+
+    if "baseline_r2" in summary.columns and "final_r2" in summary.columns:
+        summary["r2_delta"] = pd.to_numeric(summary["final_r2"], errors="coerce") - pd.to_numeric(summary["baseline_r2"], errors="coerce")
+
+    summary["label"] = [_metric_label(defect_id, group) for defect_id, group in zip(summary["defect_id"], summary["group"])]
+    return _sort_metric_summary(summary).reset_index(drop=True)
+
+
+def plot_final_metric_comparison(
+    summary_or_metrics: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    splits: tuple[str, ...] = ("valid", "test"),
+    metrics: tuple[str, ...] = ("rmse", "mae"),
+    title: str = "baseline vs final model metrics",
+):
+    """Plot baseline/final RMSE and MAE side by side by split and defect group."""
+    if summary_or_metrics.empty:
+        return None
+    summary = summary_or_metrics.copy()
+    if not any(col.startswith("baseline_") for col in summary.columns):
+        summary = final_metric_summary(summary)
+    if summary.empty:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    available_splits = [split for split in splits if (summary["split"].astype(str) == split).any()]
+    if not available_splits:
+        available_splits = sorted(summary["split"].dropna().astype(str).unique())
+    available_metrics = [metric for metric in metrics if f"baseline_{metric}" in summary.columns and f"final_{metric}" in summary.columns]
+    if not available_splits or not available_metrics:
+        return None
+
+    max_rows = max(int((summary["split"].astype(str) == split).sum()) for split in available_splits)
+    height = max(4.0, 0.45 * max_rows) * len(available_splits)
+    fig, axes = plt.subplots(
+        len(available_splits),
+        len(available_metrics),
+        figsize=(7.5 * len(available_metrics), height),
+        squeeze=False,
+    )
+
+    for row_idx, split in enumerate(available_splits):
+        split_df = _sort_metric_summary(summary[summary["split"].astype(str) == split].copy())
+        for col_idx, metric in enumerate(available_metrics):
+            _plot_final_metric_axis(axes[row_idx][col_idx], split_df, metric, split)
+
+    fig.suptitle(title)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
+def plot_round_residual_points(
+    summary: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    title: str = "round mean absolute residual",
+):
+    """Plot round 0/1/2/... average residual points by defect."""
+    if summary.empty:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    splits = [split for split in ("valid", "test") if (summary["split"].astype(str) == split).any()]
+    if not splits:
+        splits = sorted(summary["split"].dropna().astype(str).unique())
+    fig, axes = plt.subplots(1, len(splits), figsize=(8 * len(splits), 4.5), squeeze=False)
+    axes = axes[0]
+    for ax, split in zip(axes, splits):
+        work = summary[summary["split"].astype(str) == split].copy()
+        for defect_id, group_df in work.groupby("defect_id", sort=False):
+            group_df = group_df.sort_values("round")
+            ax.plot(group_df["round"], group_df["mean_abs_residual"], marker="o", linewidth=1.7, label=str(defect_id))
+            for _, row in group_df.iterrows():
+                if int(row["round"]) == 0:
+                    continue
+                ax.annotate(
+                    str(row.get("selected_feature", ""))[:24],
+                    (row["round"], row["mean_abs_residual"]),
+                    textcoords="offset points",
+                    xytext=(4, 5),
+                    fontsize=8,
+                    alpha=0.8,
+                )
+        ax.set_title(f"{split} {title}")
+        ax.set_xlabel("round")
+        ax.set_ylabel("mean abs residual (MAE)")
+        ax.grid(alpha=0.25)
+        ax.legend(loc="best", fontsize=8)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
+def plot_final_feature_set_summary(
+    feature_summary: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    title: str = "final model feature set",
+):
+    if feature_summary.empty or not {"feature_type", "count"}.issubset(feature_summary.columns):
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    work = feature_summary.copy()
+    work["count"] = pd.to_numeric(work["count"], errors="coerce").fillna(0)
+    fig, ax = plt.subplots(figsize=(6, 3.5))
+    colors = ["#4e79a7" if item == "base" else "#f28e2b" for item in work["feature_type"].astype(str)]
+    bars = ax.bar(work["feature_type"].astype(str), work["count"], color=colors, width=0.55)
+    for bar in bars:
+        height = bar.get_height()
+        ax.annotate(f"{int(height)}", (bar.get_x() + bar.get_width() / 2, height), ha="center", va="bottom", fontsize=10)
+    ax.set_title(title)
+    ax.set_ylabel("feature count")
+    ax.grid(axis="y", alpha=0.25)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
+def plot_candidate_loss_ranking(
+    ranking_df: pd.DataFrame,
+    *,
+    output_path: str | Path | None = None,
+    global_metric_col: str = "valid_global_rmse_after",
+    bad_metric_col: str = "valid_bad_rmse_after",
+    selected_col: str = "selected",
+    title_prefix: str = "candidate loss after residual boost",
+):
+    """Plot candidate rank vs after-boosting loss for global and bad groups.
+
+    The x-axis is rank after sorting each metric in ascending order, so lower
+    points on the left are better. This mirrors the manual fb_metric plots:
+    each dot is one candidate feature, and selected features are highlighted.
+    """
+    if ranking_df.empty:
+        return None
+    try:
+        import matplotlib.pyplot as plt
+    except Exception:
+        return None
+
+    fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), squeeze=False)
+    axes = axes[0]
+    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col)
+    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col)
+    fig.suptitle(title_prefix)
+    fig.tight_layout()
+    if output_path is not None:
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(output_path, dpi=150)
+    return fig
+
+
+def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, selected_col: str) -> None:
+    if metric_col not in ranking_df.columns:
+        ax.set_title(title)
+        ax.text(0.5, 0.5, f"missing column: {metric_col}", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    work = ranking_df.dropna(subset=[metric_col]).copy()
+    work[metric_col] = pd.to_numeric(work[metric_col], errors="coerce")
+    work = work.dropna(subset=[metric_col]).sort_values([metric_col, "feature_name"]).reset_index(drop=True)
+    if work.empty:
+        ax.set_title(title)
+        ax.text(0.5, 0.5, "no finite metric values", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    x = np.arange(1, len(work) + 1)
+    ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
+
+    if selected_col in work.columns:
+        selected = work[work[selected_col].astype(bool)]
+        if not selected.empty:
+            selected_x = selected.index.to_numpy() + 1
+            ax.scatter(selected_x, selected[metric_col], marker="*", s=140, color="#e76f51", label="selected feature", zorder=5)
+            for xpos, (_, row) in zip(selected_x, selected.iterrows()):
+                ax.annotate(f"rank {int(xpos)}", (xpos, row[metric_col]), textcoords="offset points", xytext=(5, 5), fontsize=8, color="#e76f51")
+
+    ax.set_title(title)
+    ax.set_xlabel("feature rank (ascending loss)")
+    ax.set_ylabel(metric_col)
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+
+
+def _plot_final_metric_axis(ax, split_df: pd.DataFrame, metric: str, split: str) -> None:
+    if split_df.empty:
+        ax.set_title(f"{split} {metric.upper()}")
+        ax.text(0.5, 0.5, "no rows", ha="center", va="center", transform=ax.transAxes)
+        ax.set_axis_off()
+        return
+
+    labels = split_df["label"].astype(str).tolist()
+    y = np.arange(len(split_df))
+    baseline = pd.to_numeric(split_df[f"baseline_{metric}"], errors="coerce")
+    final = pd.to_numeric(split_df[f"final_{metric}"], errors="coerce")
+    ax.barh(y - 0.18, baseline, height=0.36, color="#4e79a7", label="baseline")
+    ax.barh(y + 0.18, final, height=0.36, color="#f28e2b", label="final")
+    ax.set_yticks(y)
+    ax.set_yticklabels(labels)
+    ax.invert_yaxis()
+    ax.set_title(f"{split} {metric.upper()} (lower is better)")
+    ax.set_xlabel(metric.upper())
+    ax.grid(axis="x", alpha=0.25)
+    ax.legend(loc="best", fontsize=8)
+
+    finite_values = pd.concat([baseline, final]).dropna()
+    max_value = float(finite_values.max()) if not finite_values.empty else 0.0
+    x_pad = max(max_value * 0.015, 1e-9)
+    for ypos, (_, row) in enumerate(split_df.iterrows()):
+        pct = row.get(f"{metric}_reduction_pct", np.nan)
+        if pd.isna(pct) or not np.isfinite(float(pct)):
+            continue
+        row_values = pd.to_numeric(pd.Series([row.get(f"baseline_{metric}", np.nan), row.get(f"final_{metric}", np.nan)]), errors="coerce").dropna()
+        if row_values.empty:
+            continue
+        x_value = float(row_values.max())
+        color = "#2a9d8f" if float(pct) >= 0 else "#d62828"
+        ax.text(x_value + x_pad, ypos, f"{float(pct):+.1f}%", va="center", fontsize=8, color=color)
+    ax.margins(x=0.15)
+
+
+def _sort_metric_summary(summary: pd.DataFrame) -> pd.DataFrame:
+    if summary.empty:
+        return summary
+    work = summary.copy()
+    split_order = {"train": 0, "valid": 1, "test": 2}
+    group_order = {"global": 0, "bad": 1, "good": 2}
+    work["_split_order"] = work["split"].astype(str).map(split_order).fillna(99)
+    work["_defect_order"] = np.where(work["defect_id"].astype(str) == "global", "", work["defect_id"].astype(str))
+    work["_group_order"] = work["group"].astype(str).map(group_order).fillna(99)
+    work = work.sort_values(["_split_order", "_defect_order", "_group_order", "label"])
+    return work.drop(columns=["_split_order", "_defect_order", "_group_order"], errors="ignore")
+
+
+def _metric_label(defect_id: object, group: object) -> str:
+    if str(defect_id) == "global" and str(group) == "global":
+        return "all wafers"
+    return f"{defect_id} / {group}"
+
+
+def _residual_row(
+    defect_id: str,
+    group: str,
+    split: object,
+    frame: pd.DataFrame,
+    target_col: str,
+    pred_col: str,
+    residual_col: str,
+) -> dict[str, object]:
+    residual = pd.to_numeric(frame[residual_col], errors="coerce") if len(frame) else pd.Series(dtype=float)
+    return {
+        "defect_id": defect_id,
+        "group": group,
+        "split": split,
+        "n_samples": len(frame),
+        "mae": mae(frame[target_col], frame[pred_col]) if len(frame) else np.nan,
+        "rmse": rmse(frame[target_col], frame[pred_col]) if len(frame) else np.nan,
+        "mean_residual": float(residual.mean()) if len(residual) else np.nan,
+        "mean_abs_residual": float(residual.abs().mean()) if len(residual) else np.nan,
+    }
+
+
+====================================================================================================
+FILE: feature_boosting/residual_boosting.py
+====================================================================================================
+from __future__ import annotations
+
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+from .metrics import mae, residual_reduction_metrics, rmse
+from .modeling import fit_regressor, predict_regressor
+
+try:
+    from tqdm.auto import tqdm
+
+    _HAS_TQDM = True
+except Exception:
+    tqdm = None
+    _HAS_TQDM = False
+
+
+@dataclass(frozen=True)
+class ResidualFeatureBoosterConfig:
+    residual_model_params: dict[str, Any]
+    n_rounds: int = 5
+    select_per_round: int = 1
+    main_metric: str = "valid_bad_rmse_reduction"
+    min_improvement: float = 0.0
+    use_test_for_selection: bool = False
+    min_valid_bad_samples: int = 1
+    show_progress: bool = True
+    progress_every: int = 100
+
+
+@dataclass
+class BoostingResult:
+    selected_features: pd.DataFrame
+    residual_curve: pd.DataFrame
+    rankings: list[pd.DataFrame]
+    final_predictions: dict[str, np.ndarray]
+
+
+@dataclass
+class _ScorePayload:
+    row: dict[str, Any]
+    model: Any | None = None
+    pred_train: np.ndarray | None = None
+    pred_valid: np.ndarray | None = None
+    pred_test: np.ndarray | None = None
+
+
+class ResidualFeatureBooster:
+    def __init__(self, config: ResidualFeatureBoosterConfig):
+        self.config = config
+
+    def run_for_defect(
+        self,
+        *,
+        train_df: pd.DataFrame,
+        valid_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        candidate_cols: list[str],
+        target_col: str,
+        id_col: str,
+        baseline_pred_col: str,
+        defect_id: str,
+        bad_sample_ids: set[str],
+        good_sample_ids: set[str],
+        quality_summary: pd.DataFrame | None = None,
+        output_dir: str | Path | None = None,
+    ) -> BoostingResult:
+        valid_bad_mask = valid_df[id_col].astype(str).isin(bad_sample_ids).to_numpy()
+        if int(valid_bad_mask.sum()) < self.config.min_valid_bad_samples:
+            return BoostingResult(pd.DataFrame(), pd.DataFrame(), [], {})
+
+        y_train = train_df[target_col].to_numpy(dtype=float)
+        y_valid = valid_df[target_col].to_numpy(dtype=float)
+        y_test = test_df[target_col].to_numpy(dtype=float)
+        current_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        current_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        current_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
+
+        remaining = list(dict.fromkeys(candidate_cols))
+        selected_records: list[dict[str, Any]] = []
+        curve_records: list[dict[str, Any]] = []
+        rankings: list[pd.DataFrame] = []
+        output_dir = Path(output_dir) if output_dir is not None else None
+        if output_dir is not None:
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+        quality_lookup = _quality_lookup(quality_summary)
+        main_metric = _main_metric_name(self.config.main_metric, self.config.use_test_for_selection)
+
+        for round_idx in range(1, self.config.n_rounds + 1):
+            if not remaining:
+                break
+            if not _finite(current_pred_train, current_pred_valid, current_pred_test):
+                break
+
+            payloads = []
+            total_candidates = len(remaining)
+            iterator = _progress_iterator(
+                remaining,
+                enabled=self.config.show_progress,
+                desc=f"{defect_id} round {round_idx}",
+            )
+            for count, feature in enumerate(iterator, start=1):
+                payloads.append(
+                    self._score_candidate(
+                        feature,
+                        train_df=train_df,
+                        valid_df=valid_df,
+                        test_df=test_df,
+                        target_col=target_col,
+                        id_col=id_col,
+                        y_train=y_train,
+                        y_valid=y_valid,
+                        y_test=y_test,
+                        current_pred_train=current_pred_train,
+                        current_pred_valid=current_pred_valid,
+                        current_pred_test=current_pred_test,
+                        bad_sample_ids=bad_sample_ids,
+                        good_sample_ids=good_sample_ids,
+                        defect_id=defect_id,
+                        round_idx=round_idx,
+                        quality=quality_lookup.get(feature),
+                    )
+                )
+                if self.config.show_progress and not _HAS_TQDM:
+                    every = max(1, int(self.config.progress_every))
+                    if count == 1 or count == total_candidates or count % every == 0:
+                        pct = 100.0 * count / max(total_candidates, 1)
+                        print(f"[BOOST {defect_id} round {round_idx}] {count}/{total_candidates} candidates scored ({pct:.1f}%)")
+            ranking = pd.DataFrame([payload.row for payload in payloads])
+            if ranking.empty:
+                break
+            ranking = ranking.sort_values([main_metric, "feature_name"], ascending=[False, True], na_position="last")
+            ranking = ranking.reset_index(drop=True)
+            ranking.insert(2, "rank", np.arange(1, len(ranking) + 1))
+
+            valid_payloads = [
+                payload
+                for payload in payloads
+                if not payload.row.get("fail_reason")
+                and np.isfinite(float(payload.row.get(main_metric, np.nan)))
+                and payload.model is not None
+            ]
+            valid_payloads.sort(key=lambda item: float(item.row.get(main_metric, np.nan)), reverse=True)
+            selected_payloads = [
+                payload
+                for payload in valid_payloads
+                if float(payload.row.get(main_metric, np.nan)) > self.config.min_improvement
+            ][: max(1, self.config.select_per_round)]
+
+            selected_names = {payload.row["feature_name"] for payload in selected_payloads}
+            ranking["selected"] = ranking["feature_name"].isin(selected_names)
+            rankings.append(ranking)
+            if output_dir is not None:
+                ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
+
+            if not selected_payloads:
+                break
+
+            for payload in selected_payloads:
+                feature = str(payload.row["feature_name"])
+                current_pred_train = current_pred_train + payload.pred_train
+                current_pred_valid = current_pred_valid + payload.pred_valid
+                current_pred_test = current_pred_test + payload.pred_test
+                selected_records.append(_selected_record(payload.row))
+                curve_records.append(
+                    self._curve_record(
+                        defect_id=defect_id,
+                        round_idx=round_idx,
+                        selected_feature=feature,
+                        valid_df=valid_df,
+                        test_df=test_df,
+                        target_col=target_col,
+                        id_col=id_col,
+                        y_valid=y_valid,
+                        y_test=y_test,
+                        current_pred_valid=current_pred_valid,
+                        current_pred_test=current_pred_test,
+                        bad_sample_ids=bad_sample_ids,
+                        good_sample_ids=good_sample_ids,
+                    )
+                )
+                remaining = [candidate for candidate in remaining if candidate != feature]
+
+        return BoostingResult(
+            selected_features=pd.DataFrame(selected_records),
+            residual_curve=pd.DataFrame(curve_records),
+            rankings=rankings,
+            final_predictions={"train": current_pred_train, "valid": current_pred_valid, "test": current_pred_test},
+        )
+
+    def _score_candidate(
+        self,
+        feature: str,
+        *,
+        train_df: pd.DataFrame,
+        valid_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        target_col: str,
+        id_col: str,
+        y_train: np.ndarray,
+        y_valid: np.ndarray,
+        y_test: np.ndarray,
+        current_pred_train: np.ndarray,
+        current_pred_valid: np.ndarray,
+        current_pred_test: np.ndarray,
+        bad_sample_ids: set[str],
+        good_sample_ids: set[str],
+        defect_id: str,
+        round_idx: int,
+        quality: dict[str, Any] | None,
+    ) -> _ScorePayload:
+        base_row = {
+            "defect_id": defect_id,
+            "round": round_idx,
+            "feature_name": feature,
+            "valid_bad_rmse_reduction": np.nan,
+            "valid_bad_mae_reduction": np.nan,
+            "valid_bad_rmse_before": np.nan,
+            "valid_bad_rmse_after": np.nan,
+            "valid_bad_mae_before": np.nan,
+            "valid_bad_mae_after": np.nan,
+            "valid_good_rmse_reduction": np.nan,
+            "valid_good_mae_reduction": np.nan,
+            "valid_good_rmse_before": np.nan,
+            "valid_good_rmse_after": np.nan,
+            "valid_good_mae_before": np.nan,
+            "valid_good_mae_after": np.nan,
+            "valid_global_rmse_reduction": np.nan,
+            "valid_global_mae_reduction": np.nan,
+            "valid_global_rmse_before": np.nan,
+            "valid_global_rmse_after": np.nan,
+            "valid_global_mae_before": np.nan,
+            "valid_global_mae_after": np.nan,
+            "test_bad_rmse_reduction": np.nan,
+            "test_bad_mae_reduction": np.nan,
+            "test_bad_rmse_before": np.nan,
+            "test_bad_rmse_after": np.nan,
+            "test_bad_mae_before": np.nan,
+            "test_bad_mae_after": np.nan,
+            "test_good_rmse_reduction": np.nan,
+            "test_good_mae_reduction": np.nan,
+            "test_good_rmse_before": np.nan,
+            "test_good_rmse_after": np.nan,
+            "test_good_mae_before": np.nan,
+            "test_good_mae_after": np.nan,
+            "test_global_rmse_reduction": np.nan,
+            "test_global_mae_reduction": np.nan,
+            "test_global_rmse_before": np.nan,
+            "test_global_rmse_after": np.nan,
+            "test_global_mae_before": np.nan,
+            "test_global_mae_after": np.nan,
+            "missing_rate": np.nan,
+            "bad_coverage": np.nan,
+            "good_coverage": np.nan,
+            "selected": False,
+            "fail_reason": "",
+        }
+        if quality:
+            base_row.update(
+                {
+                    "missing_rate": quality.get("missing_rate", np.nan),
+                    "bad_coverage": quality.get("bad_coverage", np.nan),
+                    "good_coverage": quality.get("good_coverage", np.nan),
+                }
+            )
+            if not bool(quality.get("is_pass", True)):
+                base_row["fail_reason"] = quality.get("fail_reason", "quality_filter_failed")
+                return _ScorePayload(base_row)
+
+        try:
+            residual_train = y_train - current_pred_train
+            residual_valid = y_valid - current_pred_valid
+            if not np.isfinite(residual_train).all() or not np.isfinite(residual_valid).all():
+                raise ValueError("residual contains NaN or inf")
+            model = fit_regressor(
+                train_df,
+                residual_train,
+                valid_df,
+                residual_valid,
+                [feature],
+                self.config.residual_model_params,
+            )
+            pred_train = predict_regressor(model, train_df, [feature])
+            pred_valid = predict_regressor(model, valid_df, [feature])
+            pred_test = predict_regressor(model, test_df, [feature])
+            if not _finite(pred_train, pred_valid, pred_test):
+                raise ValueError("invalid prediction")
+        except Exception as exc:
+            base_row["fail_reason"] = f"model_fit_failed:{type(exc).__name__}"
+            return _ScorePayload(base_row)
+
+        pred_valid_after = current_pred_valid + pred_valid
+        pred_test_after = current_pred_test + pred_test
+        base_row.update(
+            _reduction_columns(
+                prefix="valid",
+                df=valid_df,
+                id_col=id_col,
+                y=y_valid,
+                before=current_pred_valid,
+                after=pred_valid_after,
+                bad_sample_ids=bad_sample_ids,
+                good_sample_ids=good_sample_ids,
+            )
+        )
+        base_row.update(
+            _reduction_columns(
+                prefix="test",
+                df=test_df,
+                id_col=id_col,
+                y=y_test,
+                before=current_pred_test,
+                after=pred_test_after,
+                bad_sample_ids=bad_sample_ids,
+                good_sample_ids=good_sample_ids,
+            )
+        )
+        return _ScorePayload(base_row, model=model, pred_train=pred_train, pred_valid=pred_valid, pred_test=pred_test)
+
+    def _curve_record(
+        self,
+        *,
+        defect_id: str,
+        round_idx: int,
+        selected_feature: str,
+        valid_df: pd.DataFrame,
+        test_df: pd.DataFrame,
+        target_col: str,
+        id_col: str,
+        y_valid: np.ndarray,
+        y_test: np.ndarray,
+        current_pred_valid: np.ndarray,
+        current_pred_test: np.ndarray,
+        bad_sample_ids: set[str],
+        good_sample_ids: set[str],
+    ) -> dict[str, Any]:
+        valid_bad = _mask(valid_df, id_col, bad_sample_ids)
+        valid_good = _mask(valid_df, id_col, good_sample_ids)
+        test_bad = _mask(test_df, id_col, bad_sample_ids)
+        test_good = _mask(test_df, id_col, good_sample_ids)
+        return {
+            "defect_id": defect_id,
+            "round": round_idx,
+            "selected_feature": selected_feature,
+            "valid_bad_rmse": rmse(y_valid[valid_bad], current_pred_valid[valid_bad]),
+            "valid_bad_mae": mae(y_valid[valid_bad], current_pred_valid[valid_bad]),
+            "valid_good_rmse": rmse(y_valid[valid_good], current_pred_valid[valid_good]),
+            "valid_good_mae": mae(y_valid[valid_good], current_pred_valid[valid_good]),
+            "test_bad_rmse": rmse(y_test[test_bad], current_pred_test[test_bad]),
+            "test_bad_mae": mae(y_test[test_bad], current_pred_test[test_bad]),
+            "test_good_rmse": rmse(y_test[test_good], current_pred_test[test_good]),
+            "test_good_mae": mae(y_test[test_good], current_pred_test[test_good]),
+            "valid_global_rmse": rmse(y_valid, current_pred_valid),
+            "test_global_rmse": rmse(y_test, current_pred_test),
+        }
+
+
+def _reduction_columns(
+    *,
+    prefix: str,
+    df: pd.DataFrame,
+    id_col: str,
+    y: np.ndarray,
+    before: np.ndarray,
+    after: np.ndarray,
+    bad_sample_ids: set[str],
+    good_sample_ids: set[str],
+) -> dict[str, float]:
+    bad = _mask(df, id_col, bad_sample_ids)
+    good = _mask(df, id_col, good_sample_ids)
+    groups = {"bad": bad, "good": good, "global": np.ones(len(df), dtype=bool)}
+    result: dict[str, float] = {}
+    for name, mask in groups.items():
+        values = residual_reduction_metrics(y[mask], before[mask], after[mask])
+        result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
+        result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
+        result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
+        result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
+        result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
+        result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
+    return result
+
+
+def _mask(df: pd.DataFrame, id_col: str, sample_ids: set[str]) -> np.ndarray:
+    return df[id_col].astype(str).isin(sample_ids).to_numpy()
+
+
+def _finite(*arrays: np.ndarray) -> bool:
+    return all(np.isfinite(np.asarray(arr, dtype=float)).all() for arr in arrays)
+
+
+def _quality_lookup(summary: pd.DataFrame | None) -> dict[str, dict[str, Any]]:
+    if summary is None or summary.empty or "feature_name" not in summary.columns:
+        return {}
+    return summary.set_index("feature_name").to_dict(orient="index")
+
+
+def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
+    if metric in {"bad_rmse_reduction", "rmse_reduction"}:
+        return "test_bad_rmse_reduction" if use_test_for_selection else "valid_bad_rmse_reduction"
+    if metric.startswith("valid_") or metric.startswith("test_"):
+        return metric
+    return f"valid_{metric}"
+
+
+def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
+    keys = [
+        "defect_id",
+        "round",
+        "feature_name",
+        "valid_bad_rmse_before",
+        "valid_bad_rmse_after",
+        "valid_bad_rmse_reduction",
+        "test_bad_rmse_before",
+        "test_bad_rmse_after",
+        "test_bad_rmse_reduction",
+        "valid_good_rmse_reduction",
+        "test_good_rmse_reduction",
+        "valid_global_rmse_after",
+        "valid_global_rmse_reduction",
+        "test_global_rmse_after",
+        "test_global_rmse_reduction",
+    ]
+    return {key: row.get(key, np.nan) for key in keys}
+
+
+def _progress_iterator(values: list[str], *, enabled: bool, desc: str):
+    if enabled and _HAS_TQDM:
+        return tqdm(values, desc=desc, unit="feature")
+    return values
+
+
+====================================================================================================
+FILE: feature_boosting/shap_analysis.py
+====================================================================================================
+from __future__ import annotations
+
+from typing import Any
+
+import numpy as np
+import pandas as pd
+
+
+def compute_shap_summary(
+    model,
+    df: pd.DataFrame,
+    *,
+    feature_cols: list[str],
+    id_col: str,
+    defects: dict[str, dict[str, set[str]]],
+    selected_features: pd.DataFrame,
+    max_samples: int = 5000,
+    random_seed: int = 42,
+) -> pd.DataFrame:
+    if not hasattr(model, "get_feature_importance"):
+        return _skipped_summary(selected_features, "model_has_no_shap_api")
+
+    selected_lookup = _selected_lookup(selected_features)
+    groups = [("global", "global", np.ones(len(df), dtype=bool))]
+    ids = df[id_col].astype(str)
+    for defect_id, defect_groups in defects.items():
+        groups.append((defect_id, "bad", ids.isin(defect_groups.get("bad", set())).to_numpy()))
+        groups.append((defect_id, "good", ids.isin(defect_groups.get("good", set())).to_numpy()))
+
+    rows: list[pd.DataFrame] = []
+    for defect_id, group_name, mask in groups:
+        if not mask.any():
+            continue
+        subset = df.loc[mask, feature_cols]
+        if len(subset) > max_samples:
+            subset = subset.sample(max_samples, random_state=random_seed)
+        try:
+            values = _catboost_shap_values(model, subset)
+        except Exception:
+            rows.append(_group_skipped(feature_cols, defect_id, group_name, "shap_failed", selected_lookup))
+            continue
+        mean_abs = np.nanmean(np.abs(values), axis=0)
+        report = pd.DataFrame(
+            {
+                "defect_id": defect_id,
+                "group": group_name,
+                "feature_name": feature_cols,
+                "mean_abs_shap": mean_abs,
+            }
+        )
+        report = report.sort_values("mean_abs_shap", ascending=False, na_position="last").reset_index(drop=True)
+        report["shap_rank"] = np.arange(1, len(report) + 1)
+        report["is_selected_feature"] = report["feature_name"].isin(selected_lookup)
+        report["selected_round"] = report["feature_name"].map(selected_lookup)
+        report["status"] = "ok"
+        rows.append(report)
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+
+
+def _catboost_shap_values(model, frame: pd.DataFrame) -> np.ndarray:
+    try:
+        from catboost import Pool
+    except Exception:
+        values = model.get_feature_importance(frame, type="ShapValues")
+    else:
+        cat_features = [
+            idx
+            for idx, col in enumerate(frame.columns)
+            if pd.api.types.is_object_dtype(frame[col]) or pd.api.types.is_categorical_dtype(frame[col])
+        ]
+        prepared = frame.copy()
+        for col in prepared.columns:
+            if pd.api.types.is_object_dtype(prepared[col]) or pd.api.types.is_categorical_dtype(prepared[col]):
+                prepared[col] = prepared[col].astype("object").where(prepared[col].notna(), "__MISSING__")
+        values = model.get_feature_importance(Pool(prepared, cat_features=cat_features), type="ShapValues")
+    values = np.asarray(values)
+    if values.ndim == 3:
+        values = values[:, :, 0]
+    if values.shape[1] == len(frame.columns) + 1:
+        values = values[:, :-1]
+    return values
+
+
+def _selected_lookup(selected_features: pd.DataFrame) -> dict[str, Any]:
+    if selected_features is None or selected_features.empty:
+        return {}
+    result = {}
+    for _, row in selected_features.iterrows():
+        feature = str(row.get("feature_name", ""))
+        if feature and feature not in result:
+            result[feature] = row.get("round", np.nan)
+    return result
+
+
+def _skipped_summary(selected_features: pd.DataFrame, reason: str) -> pd.DataFrame:
+    if selected_features is None or selected_features.empty:
+        return pd.DataFrame([{"status": reason}])
+    frame = selected_features[["defect_id", "feature_name", "round"]].copy()
+    frame["group"] = "global"
+    frame["mean_abs_shap"] = np.nan
+    frame["shap_rank"] = np.nan
+    frame["is_selected_feature"] = True
+    frame["selected_round"] = frame["round"]
+    frame["status"] = reason
+    return frame.drop(columns=["round"])
+
+
+def _group_skipped(
+    feature_cols: list[str],
+    defect_id: str,
+    group_name: str,
+    reason: str,
+    selected_lookup: dict[str, Any],
+) -> pd.DataFrame:
+    frame = pd.DataFrame({"feature_name": feature_cols})
+    frame["defect_id"] = defect_id
+    frame["group"] = group_name
+    frame["mean_abs_shap"] = np.nan
+    frame["shap_rank"] = np.nan
+    frame["is_selected_feature"] = frame["feature_name"].isin(selected_lookup)
+    frame["selected_round"] = frame["feature_name"].map(selected_lookup)
+    frame["status"] = reason
+    return frame
+
+
+====================================================================================================
+FILE: feature_boosting/splitter.py
+====================================================================================================
+from __future__ import annotations
+
+import pandas as pd
+
+
+REQUIRED_SPLITS = ("train", "valid", "test")
+
+
+def validate_splits(df: pd.DataFrame, split_col: str) -> None:
+    if split_col not in df.columns:
+        raise ValueError(f"dataset is missing split column {split_col!r}")
+    present = set(df[split_col].dropna().astype(str))
+    missing = [split for split in REQUIRED_SPLITS if split not in present]
+    if missing:
+        raise ValueError(f"dataset must contain train/valid/test splits; missing={missing}")
+
+
+def split_frame(df: pd.DataFrame, split_col: str) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    validate_splits(df, split_col)
+    split = df[split_col].astype(str)
+    train_df = df[split == "train"].copy()
+    valid_df = df[split == "valid"].copy()
+    test_df = df[split == "test"].copy()
+    if train_df.empty or valid_df.empty or test_df.empty:
+        raise ValueError("train/valid/test split must all be non-empty")
+    return train_df, valid_df, test_df
+
+
+====================================================================================================
+FILE: feature_boosting/validation.py
+====================================================================================================
+from __future__ import annotations
+
+from dataclasses import asdict
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+from .config import FeatureFilterConfig
+
+
+LEAKAGE_TOKENS = ("target", "yield", "label", "bad", "good", "defect", "group")
+
+
+def validate_input_columns(
+    base_df: pd.DataFrame,
+    candidate_df: pd.DataFrame,
+    base_feature_cols: list[str],
+    *,
+    id_col: str,
+    target_col: str,
+    split_col: str,
+) -> None:
+    missing_base = [col for col in (id_col, target_col, split_col) if col not in base_df.columns]
+    if missing_base:
+        raise ValueError(f"base dataset is missing required columns: {missing_base}")
+    missing_features = [col for col in base_feature_cols if col not in base_df.columns]
+    if missing_features:
+        raise ValueError(f"base_feature_cols contains columns absent from base dataset: {missing_features[:10]}")
+    if id_col not in candidate_df.columns:
+        raise ValueError(f"candidate features are missing id column {id_col!r}")
+    if not set(base_df[id_col].astype(str)).intersection(set(candidate_df[id_col].astype(str))):
+        raise ValueError(f"candidate features cannot be matched to base dataset on {id_col!r}")
+
+
+def validate_defect_groups(
+    defect_id: str,
+    bad_ids: set[str],
+    good_ids: set[str],
+    df: pd.DataFrame,
+    *,
+    id_col: str,
+    split_col: str,
+    min_valid_bad_samples: int = 1,
+) -> list[str]:
+    warnings: list[str] = []
+    overlap = bad_ids & good_ids
+    if overlap:
+        raise ValueError(f"[{defect_id}] bad/good groups overlap: {len(overlap)} sample ids")
+    ids = df[id_col].astype(str)
+    split = df[split_col].astype(str)
+    valid_bad = int(((split == "valid") & ids.isin(bad_ids)).sum())
+    test_bad = int(((split == "test") & ids.isin(bad_ids)).sum())
+    valid_good = int(((split == "valid") & ids.isin(good_ids)).sum())
+    test_good = int(((split == "test") & ids.isin(good_ids)).sum())
+    if valid_bad < min_valid_bad_samples:
+        warnings.append(f"low_valid_bad_samples:{valid_bad}")
+    if test_bad == 0:
+        warnings.append("no_test_bad_samples")
+    if valid_good == 0:
+        warnings.append("no_valid_good_samples")
+    if test_good == 0:
+        warnings.append("no_test_good_samples")
+    return warnings
+
+
+def profile_candidate_features(
+    df: pd.DataFrame,
+    candidate_cols: list[str],
+    *,
+    id_col: str,
+    split_col: str,
+    bad_ids: set[str],
+    good_ids: set[str],
+    config: FeatureFilterConfig,
+    protected_cols: set[str] | None = None,
+) -> pd.DataFrame:
+    protected_cols = protected_cols or set()
+    ids = df[id_col].astype(str)
+    bad_mask = ids.isin(bad_ids)
+    good_mask = ids.isin(good_ids)
+    rows = []
+    for feature in candidate_cols:
+        if feature not in df.columns:
+            rows.append(_quality_row(feature, fail_reason="missing_column", config=config))
+            continue
+        series = df[feature]
+        numeric = pd.to_numeric(series, errors="coerce")
+        non_null = series.notna()
+        missing_rate = float(1.0 - non_null.mean()) if len(series) else 1.0
+        unique_count = int(numeric.dropna().nunique())
+        train_coverage = _coverage(numeric[df[split_col].astype(str) == "train"])
+        valid_coverage = _coverage(numeric[df[split_col].astype(str) == "valid"])
+        test_coverage = _coverage(numeric[df[split_col].astype(str) == "test"])
+        bad_coverage = _coverage(numeric[bad_mask])
+        good_coverage = _coverage(numeric[good_mask])
+
+        reasons = []
+        if feature in protected_cols or _looks_like_leakage(feature):
+            reasons.append("leakage_like_feature")
+        if non_null.sum() == 0:
+            reasons.append("all_missing")
+        elif numeric.notna().sum() < non_null.sum():
+            reasons.append("non_numeric")
+        if unique_count < config.min_unique_values:
+            reasons.append("constant_feature")
+        if missing_rate > config.max_missing_rate:
+            reasons.append("high_missing_rate")
+        if bad_coverage < config.min_bad_coverage:
+            reasons.append("low_bad_coverage")
+        if good_coverage < config.min_good_coverage:
+            reasons.append("low_good_coverage")
+        if train_coverage <= 0 or valid_coverage <= 0 or test_coverage <= 0:
+            reasons.append("missing_split_values")
+
+        rows.append(
+            {
+                "feature_name": feature,
+                "missing_rate": missing_rate,
+                "unique_count": unique_count,
+                "train_coverage": train_coverage,
+                "valid_coverage": valid_coverage,
+                "test_coverage": test_coverage,
+                "bad_coverage": bad_coverage,
+                "good_coverage": good_coverage,
+                "is_pass": len(reasons) == 0,
+                "fail_reason": ";".join(dict.fromkeys(reasons)),
+                **{f"filter_{k}": v for k, v in asdict(config).items()},
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def write_quality_summary(summary: pd.DataFrame, output_path: str | Path) -> None:
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    summary.to_csv(output_path, index=False, encoding="utf-8-sig")
+
+
+def _quality_row(feature: str, fail_reason: str, config: FeatureFilterConfig) -> dict[str, object]:
+    return {
+        "feature_name": feature,
+        "missing_rate": np.nan,
+        "unique_count": 0,
+        "train_coverage": 0.0,
+        "valid_coverage": 0.0,
+        "test_coverage": 0.0,
+        "bad_coverage": 0.0,
+        "good_coverage": 0.0,
+        "is_pass": False,
+        "fail_reason": fail_reason,
+        **{f"filter_{k}": v for k, v in asdict(config).items()},
+    }
+
+
+def _coverage(series: pd.Series) -> float:
+    if len(series) == 0:
+        return 0.0
+    return float(pd.to_numeric(series, errors="coerce").notna().mean())
+
+
+def _looks_like_leakage(feature: str) -> bool:
+    lower = feature.lower()
+    return any(token in lower for token in LEAKAGE_TOKENS)
+
+
+====================================================================================================
+FILE: scripts/build_gpt_context.py
+====================================================================================================
+from __future__ import annotations
+
+import json
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+OUTPUT_PATH = ROOT / "docs" / "gpt_context_feature_boosting_rev0.txt"
+
+TEXT_FILES = [
+    "README.md",
+    "requirements.txt",
+    "configs/experiment.yaml",
+    "feature_boosting/__init__.py",
+    "feature_boosting/baseline_model.py",
+    "feature_boosting/cli.py",
+    "feature_boosting/config.py",
+    "feature_boosting/data_loader.py",
+    "feature_boosting/final_model.py",
+    "feature_boosting/metrics.py",
+    "feature_boosting/modeling.py",
+    "feature_boosting/reporting.py",
+    "feature_boosting/residual_boosting.py",
+    "feature_boosting/shap_analysis.py",
+    "feature_boosting/splitter.py",
+    "feature_boosting/validation.py",
+    "scripts/build_gpt_context.py",
+    "scripts/generate_residual_poc_toyset.py",
+    "scripts/run_experiment.py",
+    "tests/test_data_loader.py",
+    "tests/test_metrics.py",
+    "tests/test_reporting.py",
+    "tests/test_residual_boosting.py",
+    "tests/test_validation.py",
+]
+
+NOTEBOOK_FILES = [
+    "notebooks/residual_feature_boosting_poc.ipynb",
+]
+
+
+def main() -> int:
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    parts: list[str] = [
+        "# GPT Context Snapshot: feature_boosting_rev0",
+        "",
+        "이 파일은 사내망에서 GPT에게 한 번에 복붙해서 프로젝트 구조와 코드를 설명하기 위한 단일 텍스트 스냅샷입니다.",
+        "데이터 파일, output 파일, notebook 실행 결과는 제외하고 Residual-Based Feature Boosting PoC 실행에 필요한 코드와 설정을 담았습니다.",
+        "",
+        "GPT에게 붙여넣을 때는 먼저 이렇게 요청하면 됩니다:",
+        '\"아래는 feature_boosting_rev0 프로젝트의 단일 파일 코드 스냅샷이야. 전체 구조를 이해하고, 내가 묻는 코드/수식/실행 오류를 이 맥락 기준으로 설명해줘.\"',
+        "",
+        "## Included Files",
+        "",
+        *[f"- {path}" for path in TEXT_FILES],
+        *[f"- {path} (extracted notebook cells)" for path in NOTEBOOK_FILES],
+        "",
+    ]
+
+    for rel_path in TEXT_FILES:
+        path = ROOT / rel_path
+        parts.append(_section_header(f"FILE: {rel_path}"))
+        parts.append(_read_text(path))
+        parts.append("")
+
+    for rel_path in NOTEBOOK_FILES:
+        path = ROOT / rel_path
+        parts.append(_section_header(f"NOTEBOOK: {rel_path}"))
+        parts.append(_notebook_to_text(path))
+        parts.append("")
+
+    OUTPUT_PATH.write_text("\n".join(parts).rstrip() + "\n", encoding="utf-8")
+    print(f"wrote {OUTPUT_PATH}")
+    return 0
+
+
+def _section_header(title: str) -> str:
+    line = "=" * 100
+    return f"{line}\n{title}\n{line}"
+
+
+def _read_text(path: Path) -> str:
+    if not path.exists():
+        return f"[missing file: {path.relative_to(ROOT)}]"
+    return path.read_text(encoding="utf-8")
+
+
+def _notebook_to_text(path: Path) -> str:
+    if not path.exists():
+        return f"[missing notebook: {path.relative_to(ROOT)}]"
+    notebook = json.loads(path.read_text(encoding="utf-8"))
+    chunks: list[str] = []
+    for index, cell in enumerate(notebook.get("cells", [])):
+        cell_type = cell.get("cell_type", "unknown")
+        source = "".join(cell.get("source", []))
+        chunks.append(f"--- CELL {index:02d} [{cell_type}] ---")
+        chunks.append(source.rstrip())
+        chunks.append("")
+    return "\n".join(chunks).rstrip()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+====================================================================================================
+FILE: scripts/generate_residual_poc_toyset.py
+====================================================================================================
+from __future__ import annotations
+
+import argparse
+from pathlib import Path
+
+import numpy as np
+import pandas as pd
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Generate a toy dataset for the residual feature boosting PoC.")
+    parser.add_argument("--output-dir", default="data/residual_poc_toyset", help="Directory to write toy CSV files.")
+    parser.add_argument("--rows", type=int, default=14000, help="Number of wafer/sample rows.")
+    parser.add_argument(
+        "--candidate-features",
+        type=int,
+        default=5000,
+        help="Total number of candidate features, including the two planted hidden defect features.",
+    )
+    parser.add_argument(
+        "--noise-features",
+        type=int,
+        default=None,
+        help="Backward-compatible override for the number of irrelevant candidate features.",
+    )
+    parser.add_argument("--seed", type=int, default=42, help="Random seed.")
+    args = parser.parse_args(argv)
+
+    output_dir = Path(args.output_dir)
+    group_dir = output_dir / "groups"
+    group_dir.mkdir(parents=True, exist_ok=True)
+
+    noise_features = args.noise_features
+    if noise_features is None:
+        noise_features = max(0, args.candidate_features - 2)
+    base_df, candidate_df, groups = make_toyset(args.rows, noise_features, args.seed)
+    base_df.to_csv(output_dir / "base_dataset.csv", index=False, encoding="utf-8-sig")
+    candidate_df.to_csv(output_dir / "candidate_features.csv", index=False, encoding="utf-8-sig")
+    (output_dir / "base_feature_cols.txt").write_text("base_temp\nbase_pressure\n", encoding="utf-8")
+
+    for name, frame in groups.items():
+        frame.to_csv(group_dir / f"{name}.csv", index=False, encoding="utf-8-sig")
+
+    print(f"toyset written to {output_dir.resolve()}")
+    print(f"base rows={len(base_df)}, candidate features={candidate_df.shape[1] - 1}")
+    return 0
+
+
+def make_toyset(n_rows: int = 14000, n_noise_features: int = 4998, seed: int = 42):
+    rng = np.random.default_rng(seed)
+    sample_id = np.array([f"WF_{idx:04d}" for idx in range(n_rows)])
+
+    n_train = int(round(n_rows * 0.6))
+    n_valid = int(round(n_rows * 0.2))
+    n_test = n_rows - n_train - n_valid
+    split = np.array(["train"] * n_train + ["valid"] * n_valid + ["test"] * n_test)
+    rng.shuffle(split)
+
+    base_temp = rng.normal(0, 1, n_rows)
+    base_pressure = rng.normal(0, 1, n_rows)
+    hidden_defect_1 = rng.normal(0, 1, n_rows)
+    hidden_defect_2 = rng.normal(0, 1, n_rows)
+    noise_candidates = {f"cand_noise_{i:04d}": rng.normal(0, 1, n_rows) for i in range(n_noise_features)}
+
+    y = (
+        80
+        + 5.0 * base_temp
+        - 3.0 * base_pressure
+        + 6.0 * hidden_defect_1
+        - 4.0 * hidden_defect_2
+        + rng.normal(0, 0.3, n_rows)
+    )
+
+    base_df = pd.DataFrame(
+        {
+            "sample_id": sample_id,
+            "yield": y,
+            "split": split,
+            "base_temp": base_temp,
+            "base_pressure": base_pressure,
+        }
+    )
+    candidate_df = pd.DataFrame(
+        {
+            "sample_id": sample_id,
+            "hidden_defect_1": hidden_defect_1,
+            "hidden_defect_2": hidden_defect_2,
+            **noise_candidates,
+        }
+    )
+
+    bad1 = base_df.loc[hidden_defect_1 >= np.quantile(hidden_defect_1, 0.75), ["sample_id"]]
+    good1 = base_df.loc[hidden_defect_1 < np.quantile(hidden_defect_1, 0.50), ["sample_id"]]
+    bad2 = base_df.loc[hidden_defect_2 <= np.quantile(hidden_defect_2, 0.25), ["sample_id"]]
+    good2 = base_df.loc[hidden_defect_2 > np.quantile(hidden_defect_2, 0.50), ["sample_id"]]
+    bad3 = base_df.sample(min(120, max(1, n_rows // 5)), random_state=seed)[["sample_id"]]
+    good3_pool = base_df.drop(bad3.index)
+    good3 = good3_pool.sample(min(180, max(1, len(good3_pool) // 3)), random_state=seed + 1)[["sample_id"]]
+
+    groups = {
+        "defect_1_bad": bad1,
+        "defect_1_good": good1,
+        "defect_2_bad": bad2,
+        "defect_2_good": good2,
+        "defect_3_bad": bad3,
+        "defect_3_good": good3,
+    }
+    return base_df, candidate_df, groups
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+====================================================================================================
+FILE: scripts/run_experiment.py
+====================================================================================================
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from feature_boosting.cli import main
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+
+====================================================================================================
+FILE: tests/test_data_loader.py
+====================================================================================================
+from __future__ import annotations
+
+import tempfile
+import unittest
+from pathlib import Path
+
+import pandas as pd
+
+from feature_boosting.data_loader import standardize_six_file_inputs
+
+
+class DataLoaderTests(unittest.TestCase):
+    def test_standardize_six_file_inputs_with_custom_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            y_path = root / "yield_file.csv"
+            candidate_path = root / "candidate_file.csv"
+            base_path = root / "base_file.csv"
+            group_path = root / "defect_a_group.csv"
+            output_dir = root / "standardized"
+
+            pd.DataFrame(
+                {
+                    "lot_id": ["L1", "L1", "L2", "L2", "L3", "L3"],
+                    "wafer_no": [1, 2, 1, 2, 1, 2],
+                    "target_y": [80.1, 80.3, 78.4, 79.5, 82.0, 81.1],
+                }
+            ).to_csv(y_path, index=False)
+            pd.DataFrame(
+                {
+                    "lot_key": ["L1", "L1", "L2", "L2", "L3", "L3"],
+                    "wf_key": [1, 2, 1, 2, 1, 2],
+                    "candidate_signal": [1, 2, 3, 4, 5, 6],
+                    "base_pressure": [10, 11, 12, 13, 14, 15],
+                }
+            ).to_csv(candidate_path, index=False)
+            pd.DataFrame(
+                {
+                    "lot_name": ["L1", "L1", "L2", "L2", "L3", "L3"],
+                    "wf_name": [1, 2, 1, 2, 1, 2],
+                    "base_temp": [30, 31, 32, 33, 34, 35],
+                    "base_pressure": [100, 101, 102, 103, 104, 105],
+                }
+            ).to_csv(base_path, index=False)
+            pd.DataFrame(
+                {
+                    "lot_group": ["L1", "L1", "L2", "L2"],
+                    "wf_group": [1, 2, 1, 2],
+                    "judgement": ["bad", "good", "bad", "good"],
+                }
+            ).to_csv(group_path, index=False)
+
+            result = standardize_six_file_inputs(
+                y_path=y_path,
+                candidate_path=candidate_path,
+                base_feature_path=base_path,
+                defect_groups=[
+                    {
+                        "defect_id": "defect_a",
+                        "group_path": group_path,
+                        "lot_col": "lot_group",
+                        "wf_col": "wf_group",
+                        "label_col": "judgement",
+                    }
+                ],
+                output_dir=output_dir,
+                y_lot_col="lot_id",
+                y_wf_col="wafer_no",
+                y_target_col="target_y",
+                candidate_lot_col="lot_key",
+                candidate_wf_col="wf_key",
+                base_lot_col="lot_name",
+                base_wf_col="wf_name",
+            )
+
+            base_df = pd.read_csv(result["base_dataset"])
+            candidate_df = pd.read_csv(result["candidate_features"])
+            base_cols = Path(result["base_feature_cols"]).read_text(encoding="utf-8").splitlines()
+            bad_df = pd.read_csv(result["defects"][0]["bad_group_path"])
+            good_df = pd.read_csv(result["defects"][0]["good_group_path"])
+
+            self.assertEqual({"sample_id", "yield", "split", "base_temp", "base_pressure"}, set(base_df.columns))
+            self.assertIn("candidate_signal", candidate_df.columns)
+            self.assertIn("candidate__base_pressure", candidate_df.columns)
+            self.assertEqual(["base_temp", "base_pressure"], base_cols)
+            self.assertEqual({"L1_1", "L2_1"}, set(bad_df["sample_id"].astype(str)))
+            self.assertEqual({"L1_2", "L2_2"}, set(good_df["sample_id"].astype(str)))
+            self.assertEqual({"train", "valid", "test"}, set(base_df["split"].astype(str)))
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+====================================================================================================
+FILE: tests/test_metrics.py
+====================================================================================================
+from __future__ import annotations
+
+import unittest
+
+import pandas as pd
+
+from feature_boosting.metrics import mae, residual_reduction_metrics, rmse
+from feature_boosting.reporting import round_residual_summary
+
+
+class MetricTests(unittest.TestCase):
+    def test_rmse_and_mae(self) -> None:
+        self.assertAlmostEqual(rmse([1, 2, 3], [1, 2, 5]), (4 / 3) ** 0.5)
+        self.assertAlmostEqual(mae([1, 2, 3], [1, 2, 5]), 2 / 3)
+
+    def test_residual_reduction_sign(self) -> None:
+        metrics = residual_reduction_metrics([1, 2, 3], [1, 1, 1], [1, 2, 3])
+        self.assertGreater(metrics["rmse_reduction"], 0)
+        self.assertGreater(metrics["mae_reduction"], 0)
+
+    def test_round_residual_summary_includes_baseline_round(self) -> None:
+        baseline = pd.DataFrame(
+            [
+                {"defect_id": "defect_1", "group": "bad", "split": "valid", "mean_abs_residual": 3.0},
+                {"defect_id": "defect_1", "group": "bad", "split": "test", "mean_abs_residual": 4.0},
+            ]
+        )
+        curve = pd.DataFrame(
+            [
+                {
+                    "defect_id": "defect_1",
+                    "round": 1,
+                    "selected_feature": "hidden",
+                    "valid_bad_mae": 2.0,
+                    "test_bad_mae": 3.5,
+                }
+            ]
+        )
+        summary = round_residual_summary(curve, baseline, group="bad")
+        self.assertEqual(summary["round"].tolist(), [0, 1, 0, 1])
+        self.assertEqual(summary["mean_abs_residual"].tolist(), [4.0, 3.5, 3.0, 2.0])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+====================================================================================================
+FILE: tests/test_reporting.py
+====================================================================================================
+from __future__ import annotations
+
+import unittest
+
+import pandas as pd
+
+from feature_boosting.reporting import final_metric_summary
+
+
+class ReportingTests(unittest.TestCase):
+    def test_final_metric_summary_calculates_reductions(self) -> None:
+        metrics = pd.DataFrame(
+            [
+                {
+                    "model_name": "baseline",
+                    "defect_id": "defect_1",
+                    "group": "bad",
+                    "split": "valid",
+                    "n_samples": 10,
+                    "rmse": 5.0,
+                    "mae": 4.0,
+                    "r2": 0.10,
+                },
+                {
+                    "model_name": "final",
+                    "defect_id": "defect_1",
+                    "group": "bad",
+                    "split": "valid",
+                    "n_samples": 10,
+                    "rmse": 4.0,
+                    "mae": 3.0,
+                    "r2": 0.25,
+                },
+            ]
+        )
+
+        summary = final_metric_summary(metrics)
+
+        self.assertEqual(len(summary), 1)
+        row = summary.iloc[0]
+        self.assertEqual(row["label"], "defect_1 / bad")
+        self.assertAlmostEqual(float(row["rmse_reduction"]), 1.0)
+        self.assertAlmostEqual(float(row["rmse_reduction_pct"]), 20.0)
+        self.assertAlmostEqual(float(row["mae_reduction"]), 1.0)
+        self.assertAlmostEqual(float(row["mae_reduction_pct"]), 25.0)
+        self.assertAlmostEqual(float(row["r2_delta"]), 0.15)
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+====================================================================================================
+FILE: tests/test_residual_boosting.py
+====================================================================================================
+from __future__ import annotations
+
+import unittest
+
+import numpy as np
+import pandas as pd
+
+from feature_boosting.residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
+
+
+class ResidualBoostingTests(unittest.TestCase):
+    def test_known_residual_feature_is_selected(self) -> None:
+        df = _synthetic_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df.loc[df["hidden"] > df["hidden"].median(), "sample_id"])
+        good_ids = set(df.loc[df["hidden"] <= df["hidden"].median(), "sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                min_improvement=0.0,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden", "noise_feature"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=good_ids,
+        )
+        self.assertFalse(result.selected_features.empty)
+        self.assertEqual(result.selected_features["feature_name"].iloc[0], "hidden")
+        self.assertGreater(float(result.selected_features["valid_bad_rmse_reduction"].iloc[0]), 0)
+
+    def test_zero_improvement_feature_is_not_selected(self) -> None:
+        df = _synthetic_frame()
+        df["yield"] = df["baseline_pred"]
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(valid_df["sample_id"]) | set(test_df["sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                min_improvement=0.0,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=set(),
+        )
+        self.assertTrue(result.selected_features.empty)
+
+
+def _synthetic_frame() -> pd.DataFrame:
+    rng = np.random.default_rng(7)
+    n = 90
+    sample_id = [f"WF_{idx:04d}" for idx in range(n)]
+    split = np.array(["train"] * 50 + ["valid"] * 20 + ["test"] * 20)
+    base = np.linspace(50, 60, n)
+    hidden = rng.normal(0, 1, n)
+    noise_feature = rng.normal(0, 1, n)
+    y = base + 4.0 * hidden + rng.normal(0, 0.02, n)
+    return pd.DataFrame(
+        {
+            "sample_id": sample_id,
+            "split": split,
+            "yield": y,
+            "baseline_pred": base,
+            "hidden": hidden,
+            "noise_feature": noise_feature,
+        }
+    )
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+====================================================================================================
+FILE: tests/test_validation.py
+====================================================================================================
+from __future__ import annotations
+
+import unittest
+
+import pandas as pd
+
+from feature_boosting.config import FeatureFilterConfig
+from feature_boosting.validation import profile_candidate_features, validate_defect_groups
+
+
+class ValidationTests(unittest.TestCase):
+    def test_group_overlap_raises(self) -> None:
+        df = pd.DataFrame({"sample_id": ["a", "b", "c"], "split": ["train", "valid", "test"]})
+        with self.assertRaises(ValueError):
+            validate_defect_groups("d1", {"a", "b"}, {"b", "c"}, df, id_col="sample_id", split_col="split")
+
+    def test_missing_and_constant_filter(self) -> None:
+        df = pd.DataFrame(
+            {
+                "sample_id": ["a", "b", "c", "d", "e", "f"],
+                "split": ["train", "train", "valid", "valid", "test", "test"],
+                "signal_feature": [1, 2, 3, 4, 5, 6],
+                "constant": [1, 1, 1, 1, 1, 1],
+                "mostly_missing": [1, None, None, None, None, None],
+            }
+        )
+        summary = profile_candidate_features(
+            df,
+            ["signal_feature", "constant", "mostly_missing"],
+            id_col="sample_id",
+            split_col="split",
+            bad_ids={"c", "e"},
+            good_ids={"d", "f"},
+            config=FeatureFilterConfig(max_missing_rate=0.5, min_unique_values=2, min_bad_coverage=0.5, min_good_coverage=0.5),
+        ).set_index("feature_name")
+        self.assertTrue(bool(summary.loc["signal_feature", "is_pass"]))
+        self.assertIn("constant_feature", summary.loc["constant", "fail_reason"])
+        self.assertIn("high_missing_rate", summary.loc["mostly_missing", "fail_reason"])
+
+
+if __name__ == "__main__":
+    unittest.main()
+
+
+====================================================================================================
+NOTEBOOK: notebooks/residual_feature_boosting_poc.ipynb
+====================================================================================================
+--- CELL 00 [markdown] ---
+# Residual-Based Feature Boosting PoC
+
+VS Code/Jupyter에서 위에서 아래로 실행하는 노트북입니다.
+
+핵심 흐름:
+
+1. `Xb` base feature로 baseline 수율 회귀 모델 학습
+2. `baseline_residual = y - baseline_pred` 계산
+3. defect별 bad/good group 기준으로 candidate feature 품질 필터링
+4. candidate feature 하나만 사용해 current residual 예측
+5. validation bad group의 `bad_rmse_reduction` 기준으로 feature 선택
+6. 선택 feature를 `Xb + selected Xnew`에 추가해 final CatBoost 재학습
+7. baseline vs final metric, ranking, SHAP summary 저장
+
+중요: residual boosting 단계에서는 `Xb`를 다시 학습하지 않습니다. 후보 feature `x_j` 하나만 residual model에 사용합니다.
+
+## 0. 환경 준비
+
+**이 셀에서 하는 일**
+
+- 현재 노트북이 어떤 폴더에서 실행되든 repo root를 찾아 작업 경로로 이동합니다.
+- `feature_boosting` 패키지를 import할 수 있도록 `sys.path`를 설정합니다.
+- 이후 셀에서 사용할 함수들을 미리 import합니다.
+
+**입력**: 없음  
+**출력**: `ROOT` 경로 출력
+
+--- CELL 01 [code] ---
+from pathlib import Path
+import os
+import sys
+
+import numpy as np
+import pandas as pd
+
+ROOT = Path.cwd().resolve()
+while not (ROOT / "feature_boosting").exists():
+    if ROOT == ROOT.parent:
+        raise RuntimeError("repo root not found")
+    ROOT = ROOT.parent
+
+os.chdir(ROOT)
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from feature_boosting.baseline_model import add_baseline_predictions, metrics_by_split, train_baseline_model
+from feature_boosting.data_loader import align_base_and_candidates, candidate_feature_cols, load_base_dataset, load_base_feature_cols, load_candidate_features, load_group_ids, standardize_six_file_inputs
+from feature_boosting.final_model import evaluate_model_by_groups, predict_final, train_final_model
+from feature_boosting.reporting import baseline_residual_summary, final_metric_summary, plot_candidate_loss_ranking, plot_final_feature_set_summary, plot_final_metric_comparison, plot_residual_curve, plot_round_residual_points, prepare_output_dir, round_residual_summary, write_csv
+from feature_boosting.residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
+from feature_boosting.shap_analysis import compute_shap_summary
+from feature_boosting.splitter import split_frame
+from feature_boosting.validation import profile_candidate_features, validate_defect_groups, validate_input_columns
+from feature_boosting.config import FeatureFilterConfig
+
+print("ROOT =", ROOT)
+
+--- CELL 02 [markdown] ---
+## 1. 실험 설정
+
+**이 셀에서 하는 일**
+
+- toyset을 쓸지 실제 데이터를 쓸지 선택합니다.
+- toyset 크기(`DEMO_N_WAFERS`, `DEMO_N_CANDIDATE_FEATURES`)를 정합니다.
+- 실제 데이터 경로, defect bad/good group 경로, output 경로를 정의합니다.
+- baseline/residual/final 모델 파라미터와 feature filter 기준을 정합니다.
+- candidate scoring 진행률을 표시할지와 출력 간격을 정합니다.
+
+기본값은 `USE_DEMO_DATA = True`입니다. 그래서 repo를 clone한 직후 실제 데이터가 없어도 toyset을 자동 생성해서 바로 실행됩니다.
+
+실제 데이터가 준비되어 있으면 `USE_DEMO_DATA = False`로 바꾸고 아래 경로만 수정하면 됩니다.
+
+실제 데이터가 6개 raw 파일 구조(`lot/wf/y`, candidate, base feature, defect별 `good_bad`)라면 `USE_RAW_SIX_FILE_DATA = True`로 바꾸고 `RAW_*` 경로와 컬럼명을 맞추면 됩니다.
+
+CatBoost가 설치되어 있으면 `backend: "auto"`에서 CatBoost를 사용합니다. CatBoost만 강제하려면 `backend: "catboost"`로 바꾸세요.
+
+**입력**: 사용자가 수정하는 설정값  
+**출력**: `OUT_DIR` 생성 및 경로 출력
+
+--- CELL 03 [code] ---
+USE_DEMO_DATA = True
+USE_RAW_SIX_FILE_DATA = False  # Set True when using the real six-file raw input format.
+DEMO_N_WAFERS = 14_000
+DEMO_N_CANDIDATE_FEATURES = 5_000  # total candidate feature count, including hidden_defect_1/2
+DEMO_RANDOM_SEED = 42
+RUN_ID = "feature_boosting_rev0_notebook"
+
+ID_COL = "sample_id"
+TARGET_COL = "yield"
+SPLIT_COL = "split"
+
+# Default paths for already-standardized inputs.
+BASE_DATASET_PATH = ROOT / "data" / "base_dataset.parquet"
+CANDIDATE_FEATURES_PATH = ROOT / "data" / "candidate_features.parquet"
+BASE_FEATURE_COLS_PATH = ROOT / "data" / "base_feature_cols.txt"
+OUTPUT_BASE_DIR = ROOT / "outputs"
+
+DEFECTS = [
+    {
+        "defect_id": "defect_1",
+        "bad_group_path": ROOT / "data" / "groups" / "defect_1_bad.csv",
+        "good_group_path": ROOT / "data" / "groups" / "defect_1_good.csv",
+    },
+    {
+        "defect_id": "defect_2",
+        "bad_group_path": ROOT / "data" / "groups" / "defect_2_bad.csv",
+        "good_group_path": ROOT / "data" / "groups" / "defect_2_good.csv",
+    },
+    {
+        "defect_id": "defect_3",
+        "bad_group_path": ROOT / "data" / "groups" / "defect_3_bad.csv",
+        "good_group_path": ROOT / "data" / "groups" / "defect_3_good.csv",
+    },
+]
+
+# Six-file raw input mode. Change these paths and column names to match your files.
+RAW_Y_PATH = ROOT / "data" / "raw" / "y.csv"
+RAW_CANDIDATE_PATH = ROOT / "data" / "raw" / "candidate_features.csv"
+RAW_BASE_FEATURE_PATH = ROOT / "data" / "raw" / "base_features.csv"
+RAW_STANDARDIZED_DIR = ROOT / "data" / "standardized_from_raw"
+
+RAW_Y_LOT_COL = "lot"
+RAW_Y_WF_COL = "wf"
+RAW_Y_TARGET_COL = "y"
+RAW_CANDIDATE_LOT_COL = "lot"
+RAW_CANDIDATE_WF_COL = "wf"
+RAW_BASE_LOT_COL = "lot"
+RAW_BASE_WF_COL = "wf"
+
+# If the y file already has train/valid/test, put that column name here. Otherwise set None.
+RAW_SPLIT_SOURCE_COL = None
+RAW_TRAIN_RATIO = 0.6
+RAW_VALID_RATIO = 0.2
+RAW_SPLIT_SEED = 42
+
+RAW_DEFECT_GROUPS = [
+    {
+        "defect_id": "defect_1",
+        "group_path": ROOT / "data" / "raw" / "defect_1_good_bad.csv",
+        "lot_col": "lot",
+        "wf_col": "wf",
+        "label_col": "good_bad",
+        "good_value": "good",
+        "bad_value": "bad",
+    },
+    {
+        "defect_id": "defect_2",
+        "group_path": ROOT / "data" / "raw" / "defect_2_good_bad.csv",
+        "lot_col": "lot",
+        "wf_col": "wf",
+        "label_col": "good_bad",
+        "good_value": "good",
+        "bad_value": "bad",
+    },
+    {
+        "defect_id": "defect_3",
+        "group_path": ROOT / "data" / "raw" / "defect_3_good_bad.csv",
+        "lot_col": "lot",
+        "wf_col": "wf",
+        "label_col": "good_bad",
+        "good_value": "good",
+        "bad_value": "bad",
+    },
+]
+
+BASELINE_MODEL_PARAMS = {
+    "backend": "auto",
+    "iterations": 3000,
+    "depth": 6,
+    "learning_rate": 0.03,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "random_seed": 42,
+    "early_stopping_rounds": 100,
+    "verbose": 200,
+}
+
+RESIDUAL_MODEL_PARAMS = {
+    "backend": "auto",
+    "iterations": 300,
+    "depth": 3,
+    "learning_rate": 0.05,
+    "loss_function": "RMSE",
+    "eval_metric": "RMSE",
+    "random_seed": 42,
+    "early_stopping_rounds": 30,
+    "verbose": False,
+    "thread_count": 1,
+}
+
+FINAL_MODEL_PARAMS = dict(BASELINE_MODEL_PARAMS)
+
+FEATURE_FILTER = FeatureFilterConfig(
+    max_missing_rate=0.5,
+    min_unique_values=2,
+    min_bad_coverage=0.7,
+    min_good_coverage=0.7,
+)
+
+BOOSTING_N_ROUNDS = 5
+SELECT_PER_ROUND = 1
+MIN_IMPROVEMENT = 0.0
+MIN_VALID_BAD_SAMPLES = 1
+BOOSTING_SHOW_PROGRESS = True
+BOOSTING_PROGRESS_EVERY = 100
+SHAP_ENABLED = True
+SHAP_MAX_SAMPLES = 5000
+
+OUT_DIR = prepare_output_dir(OUTPUT_BASE_DIR, RUN_ID)
+print("OUT_DIR =", OUT_DIR)
+
+--- CELL 04 [markdown] ---
+## 2. 선택 사항: 데모 데이터 생성
+
+**이 셀에서 하는 일**
+
+- `USE_DEMO_DATA = True`이면 synthetic toyset을 생성합니다.
+- `USE_RAW_SIX_FILE_DATA = True`이면 실제 6개 raw 파일을 표준 입력 파일로 변환합니다.
+- wafer/sample row, baseline feature, candidate feature, target `yield`를 만듭니다.
+- `hidden_defect_1`, `hidden_defect_2`는 residual에서 잡혀야 하는 planted signal입니다.
+- defect별 bad/good sample list CSV를 생성하고, 이후 셀이 그 파일을 읽도록 경로를 바꿉니다.
+
+`USE_DEMO_DATA = True`이면 아래 셀이 toyset CSV를 자동으로 생성합니다. clone 직후에는 이 기본값 그대로 실행하면 됩니다.
+
+**입력**: `DEMO_N_WAFERS`, `DEMO_N_CANDIDATE_FEATURES`, `DEMO_RANDOM_SEED` 또는 `RAW_*` 경로/컬럼명  
+**출력**: `data/residual_poc_demo/` 또는 `data/standardized_from_raw/` 아래 CSV 파일들
+
+--- CELL 05 [code] ---
+if USE_DEMO_DATA and USE_RAW_SIX_FILE_DATA:
+    raise ValueError("USE_DEMO_DATA and USE_RAW_SIX_FILE_DATA cannot both be True")
+
+if USE_DEMO_DATA:
+    demo_dir = ROOT / "data" / "residual_poc_demo"
+    group_dir = demo_dir / "groups"
+    group_dir.mkdir(parents=True, exist_ok=True)
+
+    rng = np.random.default_rng(DEMO_RANDOM_SEED)
+    n = DEMO_N_WAFERS
+    n_noise_features = max(0, DEMO_N_CANDIDATE_FEATURES - 2)
+    sample_id = np.array([f"WF_{idx:05d}" for idx in range(n)])
+    n_train = int(round(n * 0.6))
+    n_valid = int(round(n * 0.2))
+    n_test = n - n_train - n_valid
+    split = np.array(["train"] * n_train + ["valid"] * n_valid + ["test"] * n_test)
+    rng.shuffle(split)
+
+    base_temp = rng.normal(0, 1, n)
+    base_pressure = rng.normal(0, 1, n)
+    hidden_defect_1 = rng.normal(0, 1, n)
+    hidden_defect_2 = rng.normal(0, 1, n)
+    noise_candidates = {f"cand_noise_{i:04d}": rng.normal(0, 1, n) for i in range(n_noise_features)}
+
+    y = 80 + 5 * base_temp - 3 * base_pressure + 6 * hidden_defect_1 - 4 * hidden_defect_2 + rng.normal(0, 0.3, n)
+
+    base_df = pd.DataFrame(
+        {
+            ID_COL: sample_id,
+            TARGET_COL: y,
+            SPLIT_COL: split,
+            "base_temp": base_temp,
+            "base_pressure": base_pressure,
+        }
+    )
+    candidate_df = pd.DataFrame(
+        {
+            ID_COL: sample_id,
+            "hidden_defect_1": hidden_defect_1,
+            "hidden_defect_2": hidden_defect_2,
+            **noise_candidates,
+        }
+    )
+
+    BASE_DATASET_PATH = demo_dir / "base_dataset.csv"
+    CANDIDATE_FEATURES_PATH = demo_dir / "candidate_features.csv"
+    BASE_FEATURE_COLS_PATH = demo_dir / "base_feature_cols.txt"
+    base_df.to_csv(BASE_DATASET_PATH, index=False, encoding="utf-8-sig")
+    candidate_df.to_csv(CANDIDATE_FEATURES_PATH, index=False, encoding="utf-8-sig")
+    BASE_FEATURE_COLS_PATH.write_text("base_temp\nbase_pressure\n", encoding="utf-8")
+
+    bad1 = base_df.loc[hidden_defect_1 >= np.quantile(hidden_defect_1, 0.75), [ID_COL]]
+    good1 = base_df.loc[hidden_defect_1 < np.quantile(hidden_defect_1, 0.50), [ID_COL]]
+    bad2 = base_df.loc[hidden_defect_2 <= np.quantile(hidden_defect_2, 0.25), [ID_COL]]
+    good2 = base_df.loc[hidden_defect_2 > np.quantile(hidden_defect_2, 0.50), [ID_COL]]
+    bad3 = base_df.sample(min(max(1, n // 5), len(base_df)), random_state=DEMO_RANDOM_SEED)[[ID_COL]]
+    good3_pool = base_df.drop(bad3.index)
+    good3 = good3_pool.sample(min(max(1, n // 3), len(good3_pool)), random_state=DEMO_RANDOM_SEED + 1)[[ID_COL]]
+
+    bad1.to_csv(group_dir / "defect_1_bad.csv", index=False, encoding="utf-8-sig")
+    good1.to_csv(group_dir / "defect_1_good.csv", index=False, encoding="utf-8-sig")
+    bad2.to_csv(group_dir / "defect_2_bad.csv", index=False, encoding="utf-8-sig")
+    good2.to_csv(group_dir / "defect_2_good.csv", index=False, encoding="utf-8-sig")
+    bad3.to_csv(group_dir / "defect_3_bad.csv", index=False, encoding="utf-8-sig")
+    good3.to_csv(group_dir / "defect_3_good.csv", index=False, encoding="utf-8-sig")
+
+    DEFECTS = [
+        {"defect_id": "defect_1", "bad_group_path": group_dir / "defect_1_bad.csv", "good_group_path": group_dir / "defect_1_good.csv"},
+        {"defect_id": "defect_2", "bad_group_path": group_dir / "defect_2_bad.csv", "good_group_path": group_dir / "defect_2_good.csv"},
+        {"defect_id": "defect_3", "bad_group_path": group_dir / "defect_3_bad.csv", "good_group_path": group_dir / "defect_3_good.csv"},
+    ]
+    print("demo data written to", demo_dir)
+    print("demo wafers:", len(base_df), "| demo candidate features:", candidate_df.shape[1] - 1)
+
+elif USE_RAW_SIX_FILE_DATA:
+    standardized = standardize_six_file_inputs(
+        y_path=RAW_Y_PATH,
+        candidate_path=RAW_CANDIDATE_PATH,
+        base_feature_path=RAW_BASE_FEATURE_PATH,
+        defect_groups=RAW_DEFECT_GROUPS,
+        output_dir=RAW_STANDARDIZED_DIR,
+        id_col=ID_COL,
+        target_col=TARGET_COL,
+        split_col=SPLIT_COL,
+        y_lot_col=RAW_Y_LOT_COL,
+        y_wf_col=RAW_Y_WF_COL,
+        y_target_col=RAW_Y_TARGET_COL,
+        candidate_lot_col=RAW_CANDIDATE_LOT_COL,
+        candidate_wf_col=RAW_CANDIDATE_WF_COL,
+        base_lot_col=RAW_BASE_LOT_COL,
+        base_wf_col=RAW_BASE_WF_COL,
+        split_source_col=RAW_SPLIT_SOURCE_COL,
+        train_ratio=RAW_TRAIN_RATIO,
+        valid_ratio=RAW_VALID_RATIO,
+        split_seed=RAW_SPLIT_SEED,
+    )
+    BASE_DATASET_PATH = standardized["base_dataset"]
+    CANDIDATE_FEATURES_PATH = standardized["candidate_features"]
+    BASE_FEATURE_COLS_PATH = standardized["base_feature_cols"]
+    DEFECTS = standardized["defects"]
+    print("raw 6-file data standardized to", RAW_STANDARDIZED_DIR)
+    print("base dataset:", BASE_DATASET_PATH)
+    print("candidate features:", CANDIDATE_FEATURES_PATH)
+    print("defects:", [item["defect_id"] for item in DEFECTS])
+
+else:
+    print("using existing standardized input paths")
+    print("base dataset:", BASE_DATASET_PATH)
+    print("candidate features:", CANDIDATE_FEATURES_PATH)
+    print("base feature cols:", BASE_FEATURE_COLS_PATH)
+
+--- CELL 06 [markdown] ---
+## 3. 데이터 로드 및 검증
+
+**이 셀에서 하는 일**
+
+- base dataset, candidate feature dataset, base feature column list를 읽습니다.
+- 필수 컬럼(`sample_id`, `yield`, `split`)이 있는지 확인합니다.
+- base dataset과 candidate feature를 `sample_id` 기준으로 join합니다.
+- `split` 컬럼을 기준으로 train/valid/test DataFrame을 나눕니다.
+
+**입력**: base/candidate/base_feature_cols 파일  
+**출력**: `all_df`, `train_df`, `valid_df`, `test_df`, `base_feature_cols`, `candidate_cols`
+
+--- CELL 07 [code] ---
+base_df = load_base_dataset(BASE_DATASET_PATH)
+candidate_df = load_candidate_features(CANDIDATE_FEATURES_PATH)
+base_feature_cols = load_base_feature_cols(BASE_FEATURE_COLS_PATH)
+candidate_cols = candidate_feature_cols(candidate_df, ID_COL)
+
+validate_input_columns(
+    base_df,
+    candidate_df,
+    base_feature_cols,
+    id_col=ID_COL,
+    target_col=TARGET_COL,
+    split_col=SPLIT_COL,
+)
+
+all_df = align_base_and_candidates(base_df, candidate_df, ID_COL)
+train_df, valid_df, test_df = split_frame(all_df, SPLIT_COL)
+
+print("base_df:", base_df.shape)
+print("candidate_df:", candidate_df.shape)
+print("merged:", all_df.shape)
+print("base features:", len(base_feature_cols))
+print("candidate features:", len(candidate_cols))
+print(all_df[SPLIT_COL].value_counts())
+
+--- CELL 08 [markdown] ---
+## 4. defect별 bad/good group 로드
+
+**이 셀에서 하는 일**
+
+- defect마다 bad wafer list와 good wafer list를 읽습니다.
+- bad/good sample이 겹치지 않는지 검사합니다.
+- valid/test split 안에 bad/good sample이 충분히 있는지 warning을 기록합니다.
+- 이후 residual boosting에서 group metric을 계산할 수 있도록 `defect_groups` dict를 만듭니다.
+
+**입력**: `DEFECTS`에 적힌 bad/good CSV 파일  
+**출력**: `defect_groups`
+
+--- CELL 09 [code] ---
+defect_groups = {}
+for defect in DEFECTS:
+    defect_id = defect["defect_id"]
+    bad_ids = load_group_ids(defect["bad_group_path"], ID_COL)
+    good_ids = load_group_ids(defect["good_group_path"], ID_COL)
+    warnings = validate_defect_groups(
+        defect_id,
+        bad_ids,
+        good_ids,
+        all_df,
+        id_col=ID_COL,
+        split_col=SPLIT_COL,
+        min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
+    )
+    defect_groups[defect_id] = {"bad": bad_ids, "good": good_ids, "warnings": set(warnings)}
+    print(defect_id, "bad=", len(bad_ids), "good=", len(good_ids), "warnings=", warnings)
+
+--- CELL 10 [markdown] ---
+## 5. Baseline CatBoost 학습 및 residual 계산
+
+**이 셀에서 하는 일**
+
+- base feature `Xb`만 사용해 baseline 수율 회귀 모델을 학습합니다.
+- 전체 row에 대해 `baseline_pred`를 생성합니다.
+- `baseline_residual = yield - baseline_pred`를 계산합니다.
+- split별 baseline metric과 defect group별 residual summary를 저장합니다.
+
+**입력**: `train_df`, `valid_df`, `all_df`, `base_feature_cols`  
+**출력**: `baseline_model`, `baseline_metrics`, `baseline_summary`, `baseline_pred`, `baseline_residual`
+
+--- CELL 11 [code] ---
+baseline_model = train_baseline_model(
+    train_df,
+    valid_df,
+    base_feature_cols,
+    TARGET_COL,
+    BASELINE_MODEL_PARAMS,
+)
+
+all_df = add_baseline_predictions(
+    baseline_model,
+    all_df,
+    feature_cols=base_feature_cols,
+    target_col=TARGET_COL,
+)
+train_df, valid_df, test_df = split_frame(all_df, SPLIT_COL)
+
+baseline_metrics = metrics_by_split(all_df, target_col=TARGET_COL, pred_col="baseline_pred", split_col=SPLIT_COL)
+baseline_summary = baseline_residual_summary(
+    all_df,
+    target_col=TARGET_COL,
+    pred_col="baseline_pred",
+    residual_col="baseline_residual",
+    split_col=SPLIT_COL,
+    id_col=ID_COL,
+    defects=defect_groups,
+)
+
+write_csv(baseline_metrics, OUT_DIR / "baseline_metrics.csv")
+write_csv(baseline_summary, OUT_DIR / "baseline_residual_summary.csv")
+
+display(baseline_metrics)
+display(baseline_summary.head(12))
+
+--- CELL 12 [markdown] ---
+## 6. defect별 residual feature boosting
+
+**이 셀에서 하는 일**
+
+- defect별로 candidate feature 품질을 먼저 검사합니다.
+- 각 round마다 아직 선택되지 않은 candidate feature를 하나씩 residual model에 넣어 평가합니다.
+- residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
+- feature 선택은 validation bad group의 `valid_bad_rmse_reduction` 기준으로 합니다.
+- test metric은 선택에 쓰지 않고 기록/검증용으로만 저장합니다.
+- round별 ranking, 선택 feature, residual curve를 CSV로 저장합니다.
+- `BOOSTING_SHOW_PROGRESS = True`이면 candidate scoring 진행률이 출력됩니다.
+- 각 round의 candidate별 after-boosting RMSE를 rank chart로 보여주고 PNG로 저장합니다.
+- 모든 boosting이 끝난 뒤 defect별 round 평균 절대 residual point chart를 보여줍니다.
+
+각 candidate feature는 `x_j -> current residual` 단일 feature 모델로만 평가됩니다. 선택 기준은 validation bad group의 residual 감소입니다.
+
+**입력**: baseline prediction이 포함된 train/valid/test, candidate features, defect groups  
+**출력**: `quality_summary`, `selected_features`, `residual_curve`, `round_mean_residual`, `rankings/*.csv`, `plots/*candidate_loss.png`, `plots/round_mean_abs_residual_points.png`
+
+--- CELL 13 [code] ---
+booster = ResidualFeatureBooster(
+    ResidualFeatureBoosterConfig(
+        residual_model_params=RESIDUAL_MODEL_PARAMS,
+        n_rounds=BOOSTING_N_ROUNDS,
+        select_per_round=SELECT_PER_ROUND,
+        main_metric="bad_rmse_reduction",
+        min_improvement=MIN_IMPROVEMENT,
+        use_test_for_selection=False,
+        min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
+        show_progress=BOOSTING_SHOW_PROGRESS,
+        progress_every=BOOSTING_PROGRESS_EVERY,
+    )
+)
+
+quality_frames = []
+selected_frames = []
+curve_frames = []
+
+for defect in DEFECTS:
+    defect_id = defect["defect_id"]
+    groups = defect_groups[defect_id]
+    quality = profile_candidate_features(
+        all_df,
+        candidate_cols,
+        id_col=ID_COL,
+        split_col=SPLIT_COL,
+        bad_ids=groups["bad"],
+        good_ids=groups["good"],
+        config=FEATURE_FILTER,
+        protected_cols={ID_COL, TARGET_COL, SPLIT_COL, *base_feature_cols},
+    )
+    quality.insert(0, "defect_id", defect_id)
+    quality_frames.append(quality)
+
+    if any(str(item).startswith("low_valid_bad_samples") for item in groups.get("warnings", set())):
+        print(defect_id, "skipped: low valid bad samples")
+        continue
+
+    print(f"[{defect_id}] scoring {len(candidate_cols)} candidates")
+    result = booster.run_for_defect(
+        train_df=train_df,
+        valid_df=valid_df,
+        test_df=test_df,
+        candidate_cols=candidate_cols,
+        target_col=TARGET_COL,
+        id_col=ID_COL,
+        baseline_pred_col="baseline_pred",
+        defect_id=defect_id,
+        bad_sample_ids=groups["bad"],
+        good_sample_ids=groups["good"],
+        quality_summary=quality,
+        output_dir=OUT_DIR / "rankings",
+    )
+
+    if result.rankings:
+        for ranking_df in result.rankings:
+            if ranking_df.empty or "round" not in ranking_df.columns:
+                continue
+            round_no = int(ranking_df["round"].max())
+            fig = plot_candidate_loss_ranking(
+                ranking_df,
+                output_path=OUT_DIR / "plots" / f"{defect_id}_round_{round_no}_candidate_loss.png",
+                global_metric_col="valid_global_rmse_after",
+                bad_metric_col="valid_bad_rmse_after",
+                title_prefix=f"{defect_id} round {round_no}",
+            )
+            if fig is not None:
+                display(fig)
+
+    if not result.selected_features.empty:
+        selected_frames.append(result.selected_features)
+        display(result.selected_features)
+    else:
+        print(defect_id, "selected no feature")
+
+    if not result.residual_curve.empty:
+        curve_frames.append(result.residual_curve)
+
+quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
+selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
+residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+
+write_csv(quality_summary, OUT_DIR / "candidate_quality_summary.csv")
+write_csv(selected_features, OUT_DIR / "selected_features.csv")
+write_csv(residual_curve, OUT_DIR / "residual_reduction_curve.csv")
+plot_residual_curve(residual_curve, OUT_DIR)
+
+round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+write_csv(round_mean_residual, OUT_DIR / "round_mean_residual_summary.csv")
+fig = plot_round_residual_points(
+    round_mean_residual,
+    output_path=OUT_DIR / "plots" / "round_mean_abs_residual_points.png",
+)
+if fig is not None:
+    display(fig)
+
+display(selected_features)
+display(residual_curve)
+
+--- CELL 14 [markdown] ---
+## 7. Final model: Xb + selected Xnew 재학습
+
+**이 셀에서 하는 일**
+
+- residual boosting에서 선택된 feature 목록을 중복 없이 정리합니다.
+- 최종 feature set을 `base_feature_cols + selected_cols`로 만듭니다.
+- final CatBoost 회귀 모델을 새로 학습합니다.
+- baseline 모델과 final 모델의 train/valid/test 및 defect bad/good group 성능을 비교합니다.
+- final feature 구성을 막대 차트로 보여줍니다.
+- baseline vs final RMSE/MAE를 split별 비교 차트로 보여줍니다.
+
+**입력**: `selected_features`, `base_feature_cols`, `all_df`  
+**출력**: `final_model`, `final_pred`, `final_model_metrics.csv`, `final_model_metric_summary.csv`, `plots/final_model_metric_comparison.png`
+
+--- CELL 15 [code] ---
+selected_cols = []
+if not selected_features.empty:
+    for feature in selected_features["feature_name"].dropna().astype(str):
+        if feature in candidate_cols and feature not in selected_cols:
+            selected_cols.append(feature)
+
+final_feature_cols = base_feature_cols + selected_cols
+final_feature_summary = pd.DataFrame(
+    [
+        {"feature_type": "base", "count": len(base_feature_cols)},
+        {"feature_type": "selected", "count": len(selected_cols)},
+    ]
+)
+write_csv(final_feature_summary, OUT_DIR / "final_feature_set_summary.csv")
+
+print("selected_cols:", selected_cols)
+print("final feature count:", len(final_feature_cols))
+display(final_feature_summary)
+fig = plot_final_feature_set_summary(
+    final_feature_summary,
+    output_path=OUT_DIR / "plots" / "final_feature_set_summary.png",
+)
+if fig is not None:
+    display(fig)
+
+final_model = train_final_model(
+    train_df,
+    valid_df,
+    feature_cols=final_feature_cols,
+    target_col=TARGET_COL,
+    catboost_params=FINAL_MODEL_PARAMS,
+)
+all_df["final_pred"] = predict_final(final_model, all_df, final_feature_cols)
+
+final_metrics = pd.concat(
+    [
+        evaluate_model_by_groups(
+            all_df,
+            model_name="baseline",
+            pred_col="baseline_pred",
+            target_col=TARGET_COL,
+            split_col=SPLIT_COL,
+            id_col=ID_COL,
+            defects=defect_groups,
+        ),
+        evaluate_model_by_groups(
+            all_df,
+            model_name="final",
+            pred_col="final_pred",
+            target_col=TARGET_COL,
+            split_col=SPLIT_COL,
+            id_col=ID_COL,
+            defects=defect_groups,
+        ),
+    ],
+    ignore_index=True,
+)
+write_csv(final_metrics, OUT_DIR / "final_model_metrics.csv")
+
+final_metric_summary_df = final_metric_summary(final_metrics)
+write_csv(final_metric_summary_df, OUT_DIR / "final_model_metric_summary.csv")
+fig = plot_final_metric_comparison(
+    final_metric_summary_df,
+    output_path=OUT_DIR / "plots" / "final_model_metric_comparison.png",
+)
+if fig is not None:
+    display(fig)
+
+display(final_metric_summary_df)
+display(final_metrics)
+
+--- CELL 16 [markdown] ---
+## 8. Optional SHAP 검증
+
+**이 셀에서 하는 일**
+
+- final model 기준으로 SHAP summary를 계산합니다.
+- 전체 test sample, defect별 bad group, defect별 good group을 나누어 feature importance를 기록합니다.
+- residual boosting으로 선택된 feature가 final model에서도 상위권에 나타나는지 확인할 수 있게 합니다.
+- CatBoost/SHAP 계산이 불가능한 환경에서는 skip 상태를 CSV에 남깁니다.
+
+SHAP은 원인 확정이 아니라, 선택 feature가 final model에서 실제로 사용되는지 확인하는 보조 검증입니다.
+
+**입력**: `final_model`, test set, `selected_features`  
+**출력**: `shap_summary.csv`
+
+--- CELL 17 [code] ---
+if SHAP_ENABLED:
+    shap_summary = compute_shap_summary(
+        final_model,
+        all_df[all_df[SPLIT_COL].astype(str) == "test"],
+        feature_cols=final_feature_cols,
+        id_col=ID_COL,
+        defects=defect_groups,
+        selected_features=selected_features,
+        max_samples=SHAP_MAX_SAMPLES,
+    )
+else:
+    shap_summary = pd.DataFrame([{"status": "disabled"}])
+
+write_csv(shap_summary, OUT_DIR / "shap_summary.csv")
+display(shap_summary.head(30))
+
+--- CELL 18 [markdown] ---
+## 9. 산출물 확인
+
+**이 셀에서 하는 일**
+
+- 이번 run의 output directory를 출력합니다.
+- 저장된 CSV, model, plot 파일 목록을 보여줍니다.
+- 노트북 실행 후 어떤 결과물이 생겼는지 빠르게 확인하는 마지막 점검 셀입니다.
+
+**입력**: `OUT_DIR`  
+**출력**: 저장된 산출물 목록
+
+--- CELL 19 [code] ---
+print("saved to:", OUT_DIR)
+for path in sorted(OUT_DIR.rglob("*")):
+    if path.is_file():
+        print(path.relative_to(OUT_DIR))
