@@ -41,6 +41,11 @@ class BoostingConfig:
     select_per_round: int = 1
     main_metric: str = "valid_bad_rmse_reduction"
     min_improvement: float = 0.0
+    selection_mode: str = "top_k"
+    selection_metric: str | None = None
+    selection_threshold: float | None = None
+    selection_direction: str = "auto"
+    max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
     show_progress: bool = True

@@ -31,6 +31,30 @@ DEMO_N_WAFERS = 600
 DEMO_N_CANDIDATE_FEATURES = 200
 ```
 
+Boosting 단계에서 round별 feature 선택 방식도 노트북 설정 셀에서 바꿀 수 있습니다.
+
+```python
+# rank 기준으로 round마다 상위 20개 선택
+BOOSTING_SELECTION_MODE = "top_k"
+SELECT_PER_ROUND = 20
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+
+# after residual / baseline residual 비율이 0.3 이하인 feature 선택
+BOOSTING_SELECTION_MODE = "threshold"
+BOOSTING_SELECTION_METRIC = "bad_rmse_after_over_baseline"
+BOOSTING_SELECTION_THRESHOLD = 0.3
+BOOSTING_MAX_SELECT_PER_ROUND = None
+```
+
+정답인자가 있으면 defect별로 넣어두면 candidate rank chart에 별도 마커로 표시됩니다.
+
+```python
+ANSWER_FEATURES = {
+    "defect_1": ["known_root_cause_a", "known_root_cause_b"],
+    "defect_2": ["known_root_cause_c"],
+}
+```
+
 ```text
 data/residual_poc_demo/
   base_dataset.csv

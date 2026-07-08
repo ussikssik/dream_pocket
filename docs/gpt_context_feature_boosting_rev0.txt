@@ -70,6 +70,30 @@ DEMO_N_WAFERS = 600
 DEMO_N_CANDIDATE_FEATURES = 200
 ```
 
+Boosting 단계에서 round별 feature 선택 방식도 노트북 설정 셀에서 바꿀 수 있습니다.
+
+```python
+# rank 기준으로 round마다 상위 20개 선택
+BOOSTING_SELECTION_MODE = "top_k"
+SELECT_PER_ROUND = 20
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+
+# after residual / baseline residual 비율이 0.3 이하인 feature 선택
+BOOSTING_SELECTION_MODE = "threshold"
+BOOSTING_SELECTION_METRIC = "bad_rmse_after_over_baseline"
+BOOSTING_SELECTION_THRESHOLD = 0.3
+BOOSTING_MAX_SELECT_PER_ROUND = None
+```
+
+정답인자가 있으면 defect별로 넣어두면 candidate rank chart에 별도 마커로 표시됩니다.
+
+```python
+ANSWER_FEATURES = {
+    "defect_1": ["known_root_cause_a", "known_root_cause_b"],
+    "defect_2": ["known_root_cause_c"],
+}
+```
+
 ```text
 data/residual_poc_demo/
   base_dataset.csv
@@ -556,6 +580,11 @@ boosting:
   select_per_round: 1
   main_metric: "bad_rmse_reduction"
   min_improvement: 0.0
+  selection_mode: "top_k"
+  selection_metric: "bad_rmse_reduction"
+  selection_threshold:
+  selection_direction: "auto"
+  max_select_per_round:
   use_test_for_selection: false
   min_valid_bad_samples: 1
   show_progress: true
@@ -792,6 +821,11 @@ def run_experiment(config_path: Path) -> int:
             select_per_round=config.boosting.select_per_round,
             main_metric=config.boosting.main_metric,
             min_improvement=config.boosting.min_improvement,
+            selection_mode=config.boosting.selection_mode,
+            selection_metric=config.boosting.selection_metric,
+            selection_threshold=config.boosting.selection_threshold,
+            selection_direction=config.boosting.selection_direction,
+            max_select_per_round=config.boosting.max_select_per_round,
             use_test_for_selection=config.boosting.use_test_for_selection,
             min_valid_bad_samples=config.boosting.min_valid_bad_samples,
             show_progress=config.boosting.show_progress,
@@ -838,8 +872,8 @@ def run_experiment(config_path: Path) -> int:
             plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_after",
-                bad_metric_col="valid_bad_rmse_after",
+                global_metric_col="valid_global_rmse_after_over_baseline",
+                bad_metric_col="valid_bad_rmse_after_over_baseline",
                 title_prefix=f"{defect.defect_id} round {round_no}",
             )
         if not result.selected_features.empty:
@@ -1009,6 +1043,11 @@ class BoostingConfig:
     select_per_round: int = 1
     main_metric: str = "valid_bad_rmse_reduction"
     min_improvement: float = 0.0
+    selection_mode: str = "top_k"
+    selection_metric: str | None = None
+    selection_threshold: float | None = None
+    selection_direction: str = "auto"
+    max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
     show_progress: bool = True
@@ -1723,7 +1762,7 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
+def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, list[str] | set[str]] | None = None) -> None:
     if curve.empty:
         return
     try:
@@ -1734,6 +1773,20 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
         ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
+        answer_features = set(answer_features_by_defect.get(str(defect_id), [])) if answer_features_by_defect else set()
+        if answer_features and "selected_feature" in group.columns:
+            answers = group[group["selected_feature"].astype(str).isin(answer_features)]
+            if not answers.empty:
+                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="*", s=170, color="#2a9d8f", label="answer feature", zorder=5)
+                for _, row in answers.iterrows():
+                    ax.annotate(
+                        str(row.get("selected_feature", ""))[:24],
+                        (row["round"], row["valid_bad_rmse"]),
+                        textcoords="offset points",
+                        xytext=(5, 6),
+                        fontsize=8,
+                        color="#2a9d8f",
+                    )
         ax.set_xlabel("round")
         ax.set_ylabel("RMSE")
         ax.set_title(f"{defect_id} residual curve")
@@ -1983,9 +2036,11 @@ def plot_candidate_loss_ranking(
     ranking_df: pd.DataFrame,
     *,
     output_path: str | Path | None = None,
-    global_metric_col: str = "valid_global_rmse_after",
-    bad_metric_col: str = "valid_bad_rmse_after",
+    global_metric_col: str = "valid_global_rmse_after_over_baseline",
+    bad_metric_col: str = "valid_bad_rmse_after_over_baseline",
     selected_col: str = "selected",
+    answer_features: list[str] | set[str] | None = None,
+    answer_col: str = "is_answer_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
     """Plot candidate rank vs after-boosting loss for global and bad groups.
@@ -2003,8 +2058,8 @@ def plot_candidate_loss_ranking(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), squeeze=False)
     axes = axes[0]
-    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col)
-    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col)
+    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col)
+    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col)
     fig.suptitle(title_prefix)
     fig.tight_layout()
     if output_path is not None:
@@ -2014,7 +2069,15 @@ def plot_candidate_loss_ranking(
     return fig
 
 
-def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, selected_col: str) -> None:
+def _plot_loss_axis(
+    ranking_df: pd.DataFrame,
+    metric_col: str,
+    ax,
+    title: str,
+    selected_col: str,
+    answer_features: list[str] | set[str] | None,
+    answer_col: str,
+) -> None:
     if metric_col not in ranking_df.columns:
         ax.set_title(title)
         ax.text(0.5, 0.5, f"missing column: {metric_col}", ha="center", va="center", transform=ax.transAxes)
@@ -2032,6 +2095,8 @@ def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, s
 
     x = np.arange(1, len(work) + 1)
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
+    if "over_baseline" in metric_col:
+        ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
 
     if selected_col in work.columns:
         selected = work[work[selected_col].astype(bool)]
@@ -2041,9 +2106,30 @@ def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, s
             for xpos, (_, row) in zip(selected_x, selected.iterrows()):
                 ax.annotate(f"rank {int(xpos)}", (xpos, row[metric_col]), textcoords="offset points", xytext=(5, 5), fontsize=8, color="#e76f51")
 
+    answer_set = set(answer_features or [])
+    answer_mask = pd.Series(False, index=work.index)
+    if answer_set and "feature_name" in work.columns:
+        answer_mask = answer_mask | work["feature_name"].astype(str).isin(answer_set)
+    if answer_col in work.columns:
+        answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
+    answers = work[answer_mask]
+    if not answers.empty:
+        answer_x = answers.index.to_numpy() + 1
+        ax.scatter(answer_x, answers[metric_col], marker="X", s=95, color="#2a9d8f", label="answer feature", zorder=6)
+        for xpos, (_, row) in zip(answer_x, answers.iterrows()):
+            ax.annotate(
+                str(row.get("feature_name", ""))[:24],
+                (xpos, row[metric_col]),
+                textcoords="offset points",
+                xytext=(5, -11),
+                fontsize=8,
+                color="#2a9d8f",
+            )
+
     ax.set_title(title)
     ax.set_xlabel("feature rank (ascending loss)")
-    ax.set_ylabel(metric_col)
+    ylabel = "after residual / baseline residual" if "over_baseline" in metric_col else metric_col
+    ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8)
 
@@ -2138,7 +2224,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .metrics import mae, residual_reduction_metrics, rmse
+from .metrics import mae, reduction, residual_reduction_metrics, rmse
 from .modeling import fit_regressor, predict_regressor
 
 try:
@@ -2157,6 +2243,11 @@ class ResidualFeatureBoosterConfig:
     select_per_round: int = 1
     main_metric: str = "valid_bad_rmse_reduction"
     min_improvement: float = 0.0
+    selection_mode: str = "top_k"
+    selection_metric: str | None = None
+    selection_threshold: float | None = None
+    selection_direction: str = "auto"
+    max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
     show_progress: bool = True
@@ -2207,9 +2298,12 @@ class ResidualFeatureBooster:
         y_train = train_df[target_col].to_numpy(dtype=float)
         y_valid = valid_df[target_col].to_numpy(dtype=float)
         y_test = test_df[target_col].to_numpy(dtype=float)
-        current_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
-        current_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
-        current_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        current_pred_train = baseline_pred_train.copy()
+        current_pred_valid = baseline_pred_valid.copy()
+        current_pred_test = baseline_pred_test.copy()
 
         remaining = list(dict.fromkeys(candidate_cols))
         selected_records: list[dict[str, Any]] = []
@@ -2221,6 +2315,8 @@ class ResidualFeatureBooster:
 
         quality_lookup = _quality_lookup(quality_summary)
         main_metric = _main_metric_name(self.config.main_metric, self.config.use_test_for_selection)
+        selection_metric = _main_metric_name(self.config.selection_metric or self.config.main_metric, self.config.use_test_for_selection)
+        higher_is_better = _higher_is_better(selection_metric, self.config.selection_direction)
 
         for round_idx in range(1, self.config.n_rounds + 1):
             if not remaining:
@@ -2250,6 +2346,8 @@ class ResidualFeatureBooster:
                         current_pred_train=current_pred_train,
                         current_pred_valid=current_pred_valid,
                         current_pred_test=current_pred_test,
+                        baseline_pred_valid=baseline_pred_valid,
+                        baseline_pred_test=baseline_pred_test,
                         bad_sample_ids=bad_sample_ids,
                         good_sample_ids=good_sample_ids,
                         defect_id=defect_id,
@@ -2265,23 +2363,22 @@ class ResidualFeatureBooster:
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
                 break
-            ranking = ranking.sort_values([main_metric, "feature_name"], ascending=[False, True], na_position="last")
+            if selection_metric not in ranking.columns:
+                raise ValueError(f"selection metric column is missing from ranking: {selection_metric!r}")
+            ranking = ranking.sort_values([selection_metric, "feature_name"], ascending=[not higher_is_better, True], na_position="last")
             ranking = ranking.reset_index(drop=True)
             ranking.insert(2, "rank", np.arange(1, len(ranking) + 1))
+            ranking.insert(3, "ranking_metric", selection_metric)
 
             valid_payloads = [
                 payload
                 for payload in payloads
                 if not payload.row.get("fail_reason")
-                and np.isfinite(float(payload.row.get(main_metric, np.nan)))
+                and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
             ]
-            valid_payloads.sort(key=lambda item: float(item.row.get(main_metric, np.nan)), reverse=True)
-            selected_payloads = [
-                payload
-                for payload in valid_payloads
-                if float(payload.row.get(main_metric, np.nan)) > self.config.min_improvement
-            ][: max(1, self.config.select_per_round)]
+            valid_payloads.sort(key=lambda item: float(item.row.get(selection_metric, np.nan)), reverse=higher_is_better)
+            selected_payloads = self._select_payloads(valid_payloads, metric=selection_metric, higher_is_better=higher_is_better)
 
             selected_names = {payload.row["feature_name"] for payload in selected_payloads}
             ranking["selected"] = ranking["feature_name"].isin(selected_names)
@@ -2293,6 +2390,7 @@ class ResidualFeatureBooster:
                 break
 
             for payload in selected_payloads:
+                payload.row["ranking_metric"] = selection_metric
                 feature = str(payload.row["feature_name"])
                 current_pred_train = current_pred_train + payload.pred_train
                 current_pred_valid = current_pred_valid + payload.pred_valid
@@ -2339,6 +2437,8 @@ class ResidualFeatureBooster:
         current_pred_train: np.ndarray,
         current_pred_valid: np.ndarray,
         current_pred_test: np.ndarray,
+        baseline_pred_valid: np.ndarray,
+        baseline_pred_test: np.ndarray,
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
         defect_id: str,
@@ -2391,6 +2491,7 @@ class ResidualFeatureBooster:
             "selected": False,
             "fail_reason": "",
         }
+        base_row.update(_empty_baseline_ratio_columns())
         if quality:
             base_row.update(
                 {
@@ -2435,6 +2536,7 @@ class ResidualFeatureBooster:
                 y=y_valid,
                 before=current_pred_valid,
                 after=pred_valid_after,
+                baseline=baseline_pred_valid,
                 bad_sample_ids=bad_sample_ids,
                 good_sample_ids=good_sample_ids,
             )
@@ -2447,11 +2549,41 @@ class ResidualFeatureBooster:
                 y=y_test,
                 before=current_pred_test,
                 after=pred_test_after,
+                baseline=baseline_pred_test,
                 bad_sample_ids=bad_sample_ids,
                 good_sample_ids=good_sample_ids,
             )
         )
         return _ScorePayload(base_row, model=model, pred_train=pred_train, pred_valid=pred_valid, pred_test=pred_test)
+
+    def _select_payloads(self, payloads: list[_ScorePayload], *, metric: str, higher_is_better: bool) -> list[_ScorePayload]:
+        mode = str(self.config.selection_mode).strip().lower()
+        if mode in {"top_k", "rank_top_k", "rank"}:
+            selected = [
+                payload
+                for payload in payloads
+                if _passes_optional_threshold(
+                    float(payload.row.get(metric, np.nan)),
+                    threshold=self.config.selection_threshold,
+                    higher_is_better=higher_is_better,
+                )
+                and (not higher_is_better or float(payload.row.get(metric, np.nan)) > self.config.min_improvement)
+            ]
+            return selected[: max(1, int(self.config.select_per_round))]
+
+        if mode in {"threshold", "metric_threshold", "ratio_threshold"}:
+            if self.config.selection_threshold is None:
+                raise ValueError("selection_threshold must be set when selection_mode='threshold'")
+            selected = [
+                payload
+                for payload in payloads
+                if _passes_threshold(float(payload.row.get(metric, np.nan)), threshold=float(self.config.selection_threshold), higher_is_better=higher_is_better)
+            ]
+            if self.config.max_select_per_round is not None and self.config.max_select_per_round > 0:
+                selected = selected[: int(self.config.max_select_per_round)]
+            return selected
+
+        raise ValueError(f"unsupported selection_mode: {self.config.selection_mode!r}")
 
     def _curve_record(
         self,
@@ -2499,6 +2631,7 @@ def _reduction_columns(
     y: np.ndarray,
     before: np.ndarray,
     after: np.ndarray,
+    baseline: np.ndarray,
     bad_sample_ids: set[str],
     good_sample_ids: set[str],
 ) -> dict[str, float]:
@@ -2508,12 +2641,22 @@ def _reduction_columns(
     result: dict[str, float] = {}
     for name, mask in groups.items():
         values = residual_reduction_metrics(y[mask], before[mask], after[mask])
+        baseline_rmse = rmse(y[mask], baseline[mask])
+        baseline_mae = mae(y[mask], baseline[mask])
         result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
         result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
         result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
         result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
         result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
         result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
+        result[f"{prefix}_{name}_rmse_baseline"] = baseline_rmse
+        result[f"{prefix}_{name}_rmse_after_over_baseline"] = _safe_divide(values["rmse_after"], baseline_rmse)
+        result[f"{prefix}_{name}_rmse_reduction_from_baseline"] = reduction(baseline_rmse, values["rmse_after"])
+        result[f"{prefix}_{name}_rmse_reduction_from_baseline_pct"] = _safe_pct_reduction(baseline_rmse, values["rmse_after"])
+        result[f"{prefix}_{name}_mae_baseline"] = baseline_mae
+        result[f"{prefix}_{name}_mae_after_over_baseline"] = _safe_divide(values["mae_after"], baseline_mae)
+        result[f"{prefix}_{name}_mae_reduction_from_baseline"] = reduction(baseline_mae, values["mae_after"])
+        result[f"{prefix}_{name}_mae_reduction_from_baseline_pct"] = _safe_pct_reduction(baseline_mae, values["mae_after"])
     return result
 
 
@@ -2539,23 +2682,78 @@ def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
     return f"valid_{metric}"
 
 
+def _higher_is_better(metric: str, direction: str) -> bool:
+    normalized = str(direction).strip().lower()
+    if normalized in {"higher", "maximize", "max", "gte", ">="}:
+        return True
+    if normalized in {"lower", "minimize", "min", "lte", "<="}:
+        return False
+    lower_metric = metric.lower()
+    if "over_baseline" in lower_metric or lower_metric.endswith("_after") or lower_metric.endswith("_ratio"):
+        return False
+    return True
+
+
+def _passes_optional_threshold(value: float, *, threshold: float | None, higher_is_better: bool) -> bool:
+    if threshold is None:
+        return True
+    return _passes_threshold(value, threshold=float(threshold), higher_is_better=higher_is_better)
+
+
+def _passes_threshold(value: float, *, threshold: float, higher_is_better: bool) -> bool:
+    if not np.isfinite(value):
+        return False
+    return value >= threshold if higher_is_better else value <= threshold
+
+
+def _safe_divide(numerator: float, denominator: float) -> float:
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def _safe_pct_reduction(before: float, after: float) -> float:
+    if not np.isfinite(before) or not np.isfinite(after) or before == 0:
+        return float("nan")
+    return float(100.0 * (before - after) / before)
+
+
+def _empty_baseline_ratio_columns() -> dict[str, float]:
+    result: dict[str, float] = {}
+    for prefix in ("valid", "test"):
+        for group in ("bad", "good", "global"):
+            for metric in ("rmse", "mae"):
+                result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_after_over_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_reduction_from_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_reduction_from_baseline_pct"] = np.nan
+    return result
+
+
 def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "defect_id",
         "round",
         "feature_name",
+        "ranking_metric",
+        "valid_bad_rmse_baseline",
         "valid_bad_rmse_before",
         "valid_bad_rmse_after",
         "valid_bad_rmse_reduction",
+        "valid_bad_rmse_after_over_baseline",
+        "valid_bad_rmse_reduction_from_baseline_pct",
         "test_bad_rmse_before",
         "test_bad_rmse_after",
         "test_bad_rmse_reduction",
+        "test_bad_rmse_after_over_baseline",
         "valid_good_rmse_reduction",
         "test_good_rmse_reduction",
         "valid_global_rmse_after",
         "valid_global_rmse_reduction",
+        "valid_global_rmse_after_over_baseline",
         "test_global_rmse_after",
         "test_global_rmse_reduction",
+        "test_global_rmse_after_over_baseline",
     ]
     return {key: row.get(key, np.nan) for key in keys}
 
@@ -3384,6 +3582,45 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertFalse(result.selected_features.empty)
         self.assertEqual(result.selected_features["feature_name"].iloc[0], "hidden")
         self.assertGreater(float(result.selected_features["valid_bad_rmse_reduction"].iloc[0]), 0)
+        ranking = result.rankings[0].set_index("feature_name")
+        self.assertIn("valid_bad_rmse_after_over_baseline", ranking.columns)
+        self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
+
+    def test_threshold_mode_selects_by_residual_ratio(self) -> None:
+        df = _synthetic_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df.loc[df["hidden"] > df["hidden"].median(), "sample_id"])
+        good_ids = set(df.loc[df["hidden"] <= df["hidden"].median(), "sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                selection_mode="threshold",
+                selection_metric="bad_rmse_after_over_baseline",
+                selection_threshold=0.25,
+                max_select_per_round=None,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden", "noise_feature"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=good_ids,
+        )
+
+        self.assertFalse(result.selected_features.empty)
+        selected = set(result.selected_features["feature_name"].astype(str))
+        self.assertEqual(selected, {"hidden"})
 
     def test_zero_improvement_feature_is_not_selected(self) -> None:
         df = _synthetic_frame()
@@ -3692,11 +3929,32 @@ FEATURE_FILTER = FeatureFilterConfig(
 )
 
 BOOSTING_N_ROUNDS = 5
+
+# Feature selection knobs.
+# Rank mode example: BOOSTING_SELECTION_MODE="top_k", SELECT_PER_ROUND=20
+# Ratio threshold example: BOOSTING_SELECTION_MODE="threshold", BOOSTING_SELECTION_METRIC="bad_rmse_after_over_baseline", BOOSTING_SELECTION_THRESHOLD=0.3
 SELECT_PER_ROUND = 1
+BOOSTING_SELECTION_MODE = "top_k"  # "top_k" or "threshold"
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+BOOSTING_SELECTION_THRESHOLD = None
+BOOSTING_SELECTION_DIRECTION = "auto"
+BOOSTING_MAX_SELECT_PER_ROUND = None
 MIN_IMPROVEMENT = 0.0
 MIN_VALID_BAD_SAMPLES = 1
 BOOSTING_SHOW_PROGRESS = True
 BOOSTING_PROGRESS_EVERY = 100
+
+# Candidate rank chart y-axis: after residual / base-feature-only baseline residual.
+CANDIDATE_LOSS_GLOBAL_METRIC_COL = "valid_global_rmse_after_over_baseline"
+CANDIDATE_LOSS_BAD_METRIC_COL = "valid_bad_rmse_after_over_baseline"
+
+# Optional known answer features per defect. Replace these with real root-cause features in actual data.
+ANSWER_FEATURES = {
+    "defect_1": ["hidden_defect_1"],
+    "defect_2": ["hidden_defect_2"],
+    "defect_3": [],
+}
+
 SHAP_ENABLED = True
 SHAP_MAX_SAMPLES = 5000
 
@@ -3954,8 +4212,12 @@ display(baseline_summary.head(12))
 
 - defect별로 candidate feature 품질을 먼저 검사합니다.
 - 각 round마다 아직 선택되지 않은 candidate feature를 하나씩 residual model에 넣어 평가합니다.
+- 선택되는 feature 수는 설정에 따라 1개, 상위 K개, 또는 threshold 통과 feature 전체가 될 수 있습니다.
 - residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
-- feature 선택은 validation bad group의 `valid_bad_rmse_reduction` 기준으로 합니다.
+- 기본 feature 선택은 validation bad group의 `valid_bad_rmse_reduction` 기준이고, 설정에서 다른 metric으로 바꿀 수 있습니다.
+- 노트북 설정에서 `top_k` 또는 `threshold` 방식으로 round별 선택 feature 수를 조절할 수 있습니다.
+- candidate rank chart의 y축은 기본적으로 `after residual / baseline residual` 비율입니다.
+- `ANSWER_FEATURES`에 defect별 정답인자를 넣으면 chart에 별도 마커로 표시됩니다.
 - test metric은 선택에 쓰지 않고 기록/검증용으로만 저장합니다.
 - round별 ranking, 선택 feature, residual curve를 CSV로 저장합니다.
 - `BOOSTING_SHOW_PROGRESS = True`이면 candidate scoring 진행률이 출력됩니다.
@@ -3975,6 +4237,11 @@ booster = ResidualFeatureBooster(
         select_per_round=SELECT_PER_ROUND,
         main_metric="bad_rmse_reduction",
         min_improvement=MIN_IMPROVEMENT,
+        selection_mode=BOOSTING_SELECTION_MODE,
+        selection_metric=BOOSTING_SELECTION_METRIC,
+        selection_threshold=BOOSTING_SELECTION_THRESHOLD,
+        selection_direction=BOOSTING_SELECTION_DIRECTION,
+        max_select_per_round=BOOSTING_MAX_SELECT_PER_ROUND,
         use_test_for_selection=False,
         min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
         show_progress=BOOSTING_SHOW_PROGRESS,
@@ -4022,29 +4289,39 @@ for defect in DEFECTS:
         output_dir=OUT_DIR / "rankings",
     )
 
+    answer_features = set(ANSWER_FEATURES.get(defect_id, []))
+
     if result.rankings:
         for ranking_df in result.rankings:
             if ranking_df.empty or "round" not in ranking_df.columns:
                 continue
+            ranking_df = ranking_df.copy()
+            ranking_df["is_answer_feature"] = ranking_df["feature_name"].astype(str).isin(answer_features)
             round_no = int(ranking_df["round"].max())
+            write_csv(ranking_df, OUT_DIR / "rankings" / f"{defect_id}_round_{round_no}.csv")
             fig = plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=OUT_DIR / "plots" / f"{defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_after",
-                bad_metric_col="valid_bad_rmse_after",
+                global_metric_col=CANDIDATE_LOSS_GLOBAL_METRIC_COL,
+                bad_metric_col=CANDIDATE_LOSS_BAD_METRIC_COL,
+                answer_features=answer_features,
                 title_prefix=f"{defect_id} round {round_no}",
             )
             if fig is not None:
                 display(fig)
 
     if not result.selected_features.empty:
-        selected_frames.append(result.selected_features)
-        display(result.selected_features)
+        selected_for_defect = result.selected_features.copy()
+        selected_for_defect["is_answer_feature"] = selected_for_defect["feature_name"].astype(str).isin(answer_features)
+        selected_frames.append(selected_for_defect)
+        display(selected_for_defect)
     else:
         print(defect_id, "selected no feature")
 
     if not result.residual_curve.empty:
-        curve_frames.append(result.residual_curve)
+        curve_for_defect = result.residual_curve.copy()
+        curve_for_defect["is_answer_feature"] = curve_for_defect["selected_feature"].astype(str).isin(answer_features)
+        curve_frames.append(curve_for_defect)
 
 quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
 selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
@@ -4053,7 +4330,7 @@ residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else
 write_csv(quality_summary, OUT_DIR / "candidate_quality_summary.csv")
 write_csv(selected_features, OUT_DIR / "selected_features.csv")
 write_csv(residual_curve, OUT_DIR / "residual_reduction_curve.csv")
-plot_residual_curve(residual_curve, OUT_DIR)
+plot_residual_curve(residual_curve, OUT_DIR, answer_features_by_defect=ANSWER_FEATURES)
 
 round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
 write_csv(round_mean_residual, OUT_DIR / "round_mean_residual_summary.csv")

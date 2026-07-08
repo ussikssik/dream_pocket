@@ -127,6 +127,11 @@ def run_experiment(config_path: Path) -> int:
             select_per_round=config.boosting.select_per_round,
             main_metric=config.boosting.main_metric,
             min_improvement=config.boosting.min_improvement,
+            selection_mode=config.boosting.selection_mode,
+            selection_metric=config.boosting.selection_metric,
+            selection_threshold=config.boosting.selection_threshold,
+            selection_direction=config.boosting.selection_direction,
+            max_select_per_round=config.boosting.max_select_per_round,
             use_test_for_selection=config.boosting.use_test_for_selection,
             min_valid_bad_samples=config.boosting.min_valid_bad_samples,
             show_progress=config.boosting.show_progress,
@@ -173,8 +178,8 @@ def run_experiment(config_path: Path) -> int:
             plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_after",
-                bad_metric_col="valid_bad_rmse_after",
+                global_metric_col="valid_global_rmse_after_over_baseline",
+                bad_metric_col="valid_bad_rmse_after_over_baseline",
                 title_prefix=f"{defect.defect_id} round {round_no}",
             )
         if not result.selected_features.empty:

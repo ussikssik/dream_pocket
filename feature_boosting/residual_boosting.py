@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .metrics import mae, residual_reduction_metrics, rmse
+from .metrics import mae, reduction, residual_reduction_metrics, rmse
 from .modeling import fit_regressor, predict_regressor
 
 try:
@@ -26,6 +26,11 @@ class ResidualFeatureBoosterConfig:
     select_per_round: int = 1
     main_metric: str = "valid_bad_rmse_reduction"
     min_improvement: float = 0.0
+    selection_mode: str = "top_k"
+    selection_metric: str | None = None
+    selection_threshold: float | None = None
+    selection_direction: str = "auto"
+    max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
     show_progress: bool = True
@@ -76,9 +81,12 @@ class ResidualFeatureBooster:
         y_train = train_df[target_col].to_numpy(dtype=float)
         y_valid = valid_df[target_col].to_numpy(dtype=float)
         y_test = test_df[target_col].to_numpy(dtype=float)
-        current_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
-        current_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
-        current_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        baseline_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
+        current_pred_train = baseline_pred_train.copy()
+        current_pred_valid = baseline_pred_valid.copy()
+        current_pred_test = baseline_pred_test.copy()
 
         remaining = list(dict.fromkeys(candidate_cols))
         selected_records: list[dict[str, Any]] = []
@@ -90,6 +98,8 @@ class ResidualFeatureBooster:
 
         quality_lookup = _quality_lookup(quality_summary)
         main_metric = _main_metric_name(self.config.main_metric, self.config.use_test_for_selection)
+        selection_metric = _main_metric_name(self.config.selection_metric or self.config.main_metric, self.config.use_test_for_selection)
+        higher_is_better = _higher_is_better(selection_metric, self.config.selection_direction)
 
         for round_idx in range(1, self.config.n_rounds + 1):
             if not remaining:
@@ -119,6 +129,8 @@ class ResidualFeatureBooster:
                         current_pred_train=current_pred_train,
                         current_pred_valid=current_pred_valid,
                         current_pred_test=current_pred_test,
+                        baseline_pred_valid=baseline_pred_valid,
+                        baseline_pred_test=baseline_pred_test,
                         bad_sample_ids=bad_sample_ids,
                         good_sample_ids=good_sample_ids,
                         defect_id=defect_id,
@@ -134,23 +146,22 @@ class ResidualFeatureBooster:
             ranking = pd.DataFrame([payload.row for payload in payloads])
             if ranking.empty:
                 break
-            ranking = ranking.sort_values([main_metric, "feature_name"], ascending=[False, True], na_position="last")
+            if selection_metric not in ranking.columns:
+                raise ValueError(f"selection metric column is missing from ranking: {selection_metric!r}")
+            ranking = ranking.sort_values([selection_metric, "feature_name"], ascending=[not higher_is_better, True], na_position="last")
             ranking = ranking.reset_index(drop=True)
             ranking.insert(2, "rank", np.arange(1, len(ranking) + 1))
+            ranking.insert(3, "ranking_metric", selection_metric)
 
             valid_payloads = [
                 payload
                 for payload in payloads
                 if not payload.row.get("fail_reason")
-                and np.isfinite(float(payload.row.get(main_metric, np.nan)))
+                and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
             ]
-            valid_payloads.sort(key=lambda item: float(item.row.get(main_metric, np.nan)), reverse=True)
-            selected_payloads = [
-                payload
-                for payload in valid_payloads
-                if float(payload.row.get(main_metric, np.nan)) > self.config.min_improvement
-            ][: max(1, self.config.select_per_round)]
+            valid_payloads.sort(key=lambda item: float(item.row.get(selection_metric, np.nan)), reverse=higher_is_better)
+            selected_payloads = self._select_payloads(valid_payloads, metric=selection_metric, higher_is_better=higher_is_better)
 
             selected_names = {payload.row["feature_name"] for payload in selected_payloads}
             ranking["selected"] = ranking["feature_name"].isin(selected_names)
@@ -162,6 +173,7 @@ class ResidualFeatureBooster:
                 break
 
             for payload in selected_payloads:
+                payload.row["ranking_metric"] = selection_metric
                 feature = str(payload.row["feature_name"])
                 current_pred_train = current_pred_train + payload.pred_train
                 current_pred_valid = current_pred_valid + payload.pred_valid
@@ -208,6 +220,8 @@ class ResidualFeatureBooster:
         current_pred_train: np.ndarray,
         current_pred_valid: np.ndarray,
         current_pred_test: np.ndarray,
+        baseline_pred_valid: np.ndarray,
+        baseline_pred_test: np.ndarray,
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
         defect_id: str,
@@ -260,6 +274,7 @@ class ResidualFeatureBooster:
             "selected": False,
             "fail_reason": "",
         }
+        base_row.update(_empty_baseline_ratio_columns())
         if quality:
             base_row.update(
                 {
@@ -304,6 +319,7 @@ class ResidualFeatureBooster:
                 y=y_valid,
                 before=current_pred_valid,
                 after=pred_valid_after,
+                baseline=baseline_pred_valid,
                 bad_sample_ids=bad_sample_ids,
                 good_sample_ids=good_sample_ids,
             )
@@ -316,11 +332,41 @@ class ResidualFeatureBooster:
                 y=y_test,
                 before=current_pred_test,
                 after=pred_test_after,
+                baseline=baseline_pred_test,
                 bad_sample_ids=bad_sample_ids,
                 good_sample_ids=good_sample_ids,
             )
         )
         return _ScorePayload(base_row, model=model, pred_train=pred_train, pred_valid=pred_valid, pred_test=pred_test)
+
+    def _select_payloads(self, payloads: list[_ScorePayload], *, metric: str, higher_is_better: bool) -> list[_ScorePayload]:
+        mode = str(self.config.selection_mode).strip().lower()
+        if mode in {"top_k", "rank_top_k", "rank"}:
+            selected = [
+                payload
+                for payload in payloads
+                if _passes_optional_threshold(
+                    float(payload.row.get(metric, np.nan)),
+                    threshold=self.config.selection_threshold,
+                    higher_is_better=higher_is_better,
+                )
+                and (not higher_is_better or float(payload.row.get(metric, np.nan)) > self.config.min_improvement)
+            ]
+            return selected[: max(1, int(self.config.select_per_round))]
+
+        if mode in {"threshold", "metric_threshold", "ratio_threshold"}:
+            if self.config.selection_threshold is None:
+                raise ValueError("selection_threshold must be set when selection_mode='threshold'")
+            selected = [
+                payload
+                for payload in payloads
+                if _passes_threshold(float(payload.row.get(metric, np.nan)), threshold=float(self.config.selection_threshold), higher_is_better=higher_is_better)
+            ]
+            if self.config.max_select_per_round is not None and self.config.max_select_per_round > 0:
+                selected = selected[: int(self.config.max_select_per_round)]
+            return selected
+
+        raise ValueError(f"unsupported selection_mode: {self.config.selection_mode!r}")
 
     def _curve_record(
         self,
@@ -368,6 +414,7 @@ def _reduction_columns(
     y: np.ndarray,
     before: np.ndarray,
     after: np.ndarray,
+    baseline: np.ndarray,
     bad_sample_ids: set[str],
     good_sample_ids: set[str],
 ) -> dict[str, float]:
@@ -377,12 +424,22 @@ def _reduction_columns(
     result: dict[str, float] = {}
     for name, mask in groups.items():
         values = residual_reduction_metrics(y[mask], before[mask], after[mask])
+        baseline_rmse = rmse(y[mask], baseline[mask])
+        baseline_mae = mae(y[mask], baseline[mask])
         result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
         result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
         result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
         result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
         result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
         result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
+        result[f"{prefix}_{name}_rmse_baseline"] = baseline_rmse
+        result[f"{prefix}_{name}_rmse_after_over_baseline"] = _safe_divide(values["rmse_after"], baseline_rmse)
+        result[f"{prefix}_{name}_rmse_reduction_from_baseline"] = reduction(baseline_rmse, values["rmse_after"])
+        result[f"{prefix}_{name}_rmse_reduction_from_baseline_pct"] = _safe_pct_reduction(baseline_rmse, values["rmse_after"])
+        result[f"{prefix}_{name}_mae_baseline"] = baseline_mae
+        result[f"{prefix}_{name}_mae_after_over_baseline"] = _safe_divide(values["mae_after"], baseline_mae)
+        result[f"{prefix}_{name}_mae_reduction_from_baseline"] = reduction(baseline_mae, values["mae_after"])
+        result[f"{prefix}_{name}_mae_reduction_from_baseline_pct"] = _safe_pct_reduction(baseline_mae, values["mae_after"])
     return result
 
 
@@ -408,23 +465,78 @@ def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
     return f"valid_{metric}"
 
 
+def _higher_is_better(metric: str, direction: str) -> bool:
+    normalized = str(direction).strip().lower()
+    if normalized in {"higher", "maximize", "max", "gte", ">="}:
+        return True
+    if normalized in {"lower", "minimize", "min", "lte", "<="}:
+        return False
+    lower_metric = metric.lower()
+    if "over_baseline" in lower_metric or lower_metric.endswith("_after") or lower_metric.endswith("_ratio"):
+        return False
+    return True
+
+
+def _passes_optional_threshold(value: float, *, threshold: float | None, higher_is_better: bool) -> bool:
+    if threshold is None:
+        return True
+    return _passes_threshold(value, threshold=float(threshold), higher_is_better=higher_is_better)
+
+
+def _passes_threshold(value: float, *, threshold: float, higher_is_better: bool) -> bool:
+    if not np.isfinite(value):
+        return False
+    return value >= threshold if higher_is_better else value <= threshold
+
+
+def _safe_divide(numerator: float, denominator: float) -> float:
+    if not np.isfinite(numerator) or not np.isfinite(denominator) or denominator == 0:
+        return float("nan")
+    return float(numerator / denominator)
+
+
+def _safe_pct_reduction(before: float, after: float) -> float:
+    if not np.isfinite(before) or not np.isfinite(after) or before == 0:
+        return float("nan")
+    return float(100.0 * (before - after) / before)
+
+
+def _empty_baseline_ratio_columns() -> dict[str, float]:
+    result: dict[str, float] = {}
+    for prefix in ("valid", "test"):
+        for group in ("bad", "good", "global"):
+            for metric in ("rmse", "mae"):
+                result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_after_over_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_reduction_from_baseline"] = np.nan
+                result[f"{prefix}_{group}_{metric}_reduction_from_baseline_pct"] = np.nan
+    return result
+
+
 def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
     keys = [
         "defect_id",
         "round",
         "feature_name",
+        "ranking_metric",
+        "valid_bad_rmse_baseline",
         "valid_bad_rmse_before",
         "valid_bad_rmse_after",
         "valid_bad_rmse_reduction",
+        "valid_bad_rmse_after_over_baseline",
+        "valid_bad_rmse_reduction_from_baseline_pct",
         "test_bad_rmse_before",
         "test_bad_rmse_after",
         "test_bad_rmse_reduction",
+        "test_bad_rmse_after_over_baseline",
         "valid_good_rmse_reduction",
         "test_good_rmse_reduction",
         "valid_global_rmse_after",
         "valid_global_rmse_reduction",
+        "valid_global_rmse_after_over_baseline",
         "test_global_rmse_after",
         "test_global_rmse_reduction",
+        "test_global_rmse_after_over_baseline",
     ]
     return {key: row.get(key, np.nan) for key in keys}
 

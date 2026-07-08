@@ -89,7 +89,7 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
+def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, list[str] | set[str]] | None = None) -> None:
     if curve.empty:
         return
     try:
@@ -100,6 +100,20 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path) -> None:
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
         ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
+        answer_features = set(answer_features_by_defect.get(str(defect_id), [])) if answer_features_by_defect else set()
+        if answer_features and "selected_feature" in group.columns:
+            answers = group[group["selected_feature"].astype(str).isin(answer_features)]
+            if not answers.empty:
+                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="*", s=170, color="#2a9d8f", label="answer feature", zorder=5)
+                for _, row in answers.iterrows():
+                    ax.annotate(
+                        str(row.get("selected_feature", ""))[:24],
+                        (row["round"], row["valid_bad_rmse"]),
+                        textcoords="offset points",
+                        xytext=(5, 6),
+                        fontsize=8,
+                        color="#2a9d8f",
+                    )
         ax.set_xlabel("round")
         ax.set_ylabel("RMSE")
         ax.set_title(f"{defect_id} residual curve")
@@ -349,9 +363,11 @@ def plot_candidate_loss_ranking(
     ranking_df: pd.DataFrame,
     *,
     output_path: str | Path | None = None,
-    global_metric_col: str = "valid_global_rmse_after",
-    bad_metric_col: str = "valid_bad_rmse_after",
+    global_metric_col: str = "valid_global_rmse_after_over_baseline",
+    bad_metric_col: str = "valid_bad_rmse_after_over_baseline",
     selected_col: str = "selected",
+    answer_features: list[str] | set[str] | None = None,
+    answer_col: str = "is_answer_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
     """Plot candidate rank vs after-boosting loss for global and bad groups.
@@ -369,8 +385,8 @@ def plot_candidate_loss_ranking(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), squeeze=False)
     axes = axes[0]
-    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col)
-    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col)
+    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col)
+    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col)
     fig.suptitle(title_prefix)
     fig.tight_layout()
     if output_path is not None:
@@ -380,7 +396,15 @@ def plot_candidate_loss_ranking(
     return fig
 
 
-def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, selected_col: str) -> None:
+def _plot_loss_axis(
+    ranking_df: pd.DataFrame,
+    metric_col: str,
+    ax,
+    title: str,
+    selected_col: str,
+    answer_features: list[str] | set[str] | None,
+    answer_col: str,
+) -> None:
     if metric_col not in ranking_df.columns:
         ax.set_title(title)
         ax.text(0.5, 0.5, f"missing column: {metric_col}", ha="center", va="center", transform=ax.transAxes)
@@ -398,6 +422,8 @@ def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, s
 
     x = np.arange(1, len(work) + 1)
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
+    if "over_baseline" in metric_col:
+        ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
 
     if selected_col in work.columns:
         selected = work[work[selected_col].astype(bool)]
@@ -407,9 +433,30 @@ def _plot_loss_axis(ranking_df: pd.DataFrame, metric_col: str, ax, title: str, s
             for xpos, (_, row) in zip(selected_x, selected.iterrows()):
                 ax.annotate(f"rank {int(xpos)}", (xpos, row[metric_col]), textcoords="offset points", xytext=(5, 5), fontsize=8, color="#e76f51")
 
+    answer_set = set(answer_features or [])
+    answer_mask = pd.Series(False, index=work.index)
+    if answer_set and "feature_name" in work.columns:
+        answer_mask = answer_mask | work["feature_name"].astype(str).isin(answer_set)
+    if answer_col in work.columns:
+        answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
+    answers = work[answer_mask]
+    if not answers.empty:
+        answer_x = answers.index.to_numpy() + 1
+        ax.scatter(answer_x, answers[metric_col], marker="X", s=95, color="#2a9d8f", label="answer feature", zorder=6)
+        for xpos, (_, row) in zip(answer_x, answers.iterrows()):
+            ax.annotate(
+                str(row.get("feature_name", ""))[:24],
+                (xpos, row[metric_col]),
+                textcoords="offset points",
+                xytext=(5, -11),
+                fontsize=8,
+                color="#2a9d8f",
+            )
+
     ax.set_title(title)
     ax.set_xlabel("feature rank (ascending loss)")
-    ax.set_ylabel(metric_col)
+    ylabel = "after residual / baseline residual" if "over_baseline" in metric_col else metric_col
+    ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8)
 

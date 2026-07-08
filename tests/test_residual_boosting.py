@@ -40,6 +40,45 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertFalse(result.selected_features.empty)
         self.assertEqual(result.selected_features["feature_name"].iloc[0], "hidden")
         self.assertGreater(float(result.selected_features["valid_bad_rmse_reduction"].iloc[0]), 0)
+        ranking = result.rankings[0].set_index("feature_name")
+        self.assertIn("valid_bad_rmse_after_over_baseline", ranking.columns)
+        self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
+
+    def test_threshold_mode_selects_by_residual_ratio(self) -> None:
+        df = _synthetic_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df.loc[df["hidden"] > df["hidden"].median(), "sample_id"])
+        good_ids = set(df.loc[df["hidden"] <= df["hidden"].median(), "sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                selection_mode="threshold",
+                selection_metric="bad_rmse_after_over_baseline",
+                selection_threshold=0.25,
+                max_select_per_round=None,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden", "noise_feature"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=good_ids,
+        )
+
+        self.assertFalse(result.selected_features.empty)
+        selected = set(result.selected_features["feature_name"].astype(str))
+        self.assertEqual(selected, {"hidden"})
 
     def test_zero_improvement_feature_is_not_selected(self) -> None:
         df = _synthetic_frame()
