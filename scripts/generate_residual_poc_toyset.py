@@ -10,8 +10,19 @@ import pandas as pd
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Generate a toy dataset for the residual feature boosting PoC.")
     parser.add_argument("--output-dir", default="data/residual_poc_toyset", help="Directory to write toy CSV files.")
-    parser.add_argument("--rows", type=int, default=600, help="Number of wafer/sample rows.")
-    parser.add_argument("--noise-features", type=int, default=50, help="Number of irrelevant candidate features.")
+    parser.add_argument("--rows", type=int, default=14000, help="Number of wafer/sample rows.")
+    parser.add_argument(
+        "--candidate-features",
+        type=int,
+        default=5000,
+        help="Total number of candidate features, including the two planted hidden defect features.",
+    )
+    parser.add_argument(
+        "--noise-features",
+        type=int,
+        default=None,
+        help="Backward-compatible override for the number of irrelevant candidate features.",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed.")
     args = parser.parse_args(argv)
 
@@ -19,7 +30,10 @@ def main(argv: list[str] | None = None) -> int:
     group_dir = output_dir / "groups"
     group_dir.mkdir(parents=True, exist_ok=True)
 
-    base_df, candidate_df, groups = make_toyset(args.rows, args.noise_features, args.seed)
+    noise_features = args.noise_features
+    if noise_features is None:
+        noise_features = max(0, args.candidate_features - 2)
+    base_df, candidate_df, groups = make_toyset(args.rows, noise_features, args.seed)
     base_df.to_csv(output_dir / "base_dataset.csv", index=False, encoding="utf-8-sig")
     candidate_df.to_csv(output_dir / "candidate_features.csv", index=False, encoding="utf-8-sig")
     (output_dir / "base_feature_cols.txt").write_text("base_temp\nbase_pressure\n", encoding="utf-8")
@@ -32,7 +46,7 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
-def make_toyset(n_rows: int = 600, n_noise_features: int = 50, seed: int = 42):
+def make_toyset(n_rows: int = 14000, n_noise_features: int = 4998, seed: int = 42):
     rng = np.random.default_rng(seed)
     sample_id = np.array([f"WF_{idx:04d}" for idx in range(n_rows)])
 
@@ -46,7 +60,7 @@ def make_toyset(n_rows: int = 600, n_noise_features: int = 50, seed: int = 42):
     base_pressure = rng.normal(0, 1, n_rows)
     hidden_defect_1 = rng.normal(0, 1, n_rows)
     hidden_defect_2 = rng.normal(0, 1, n_rows)
-    noise_candidates = {f"cand_noise_{i:03d}": rng.normal(0, 1, n_rows) for i in range(n_noise_features)}
+    noise_candidates = {f"cand_noise_{i:04d}": rng.normal(0, 1, n_rows) for i in range(n_noise_features)}
 
     y = (
         80

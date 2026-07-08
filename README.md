@@ -16,6 +16,21 @@ notebooks/residual_feature_boosting_poc.ipynb
 
 처음 clone한 직후에는 실제 데이터가 없어도 됩니다. 노트북 기본값이 `USE_DEMO_DATA = True`라서 실행 중에 toyset을 자동으로 만듭니다.
 
+노트북 기본 toyset 크기는 wafer 14,000매, candidate feature 5,000개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
+
+```python
+USE_DEMO_DATA = True
+DEMO_N_WAFERS = 14_000
+DEMO_N_CANDIDATE_FEATURES = 5_000
+```
+
+처음 빠르게 동작만 확인하고 싶으면 예를 들어 이렇게 줄여서 실행하세요.
+
+```python
+DEMO_N_WAFERS = 600
+DEMO_N_CANDIDATE_FEATURES = 200
+```
+
 ```text
 data/residual_poc_demo/
   base_dataset.csv
@@ -28,6 +43,12 @@ data/residual_poc_demo/
 
 ```powershell
 python scripts/generate_residual_poc_toyset.py
+```
+
+크기를 직접 지정할 수도 있습니다.
+
+```powershell
+python scripts/generate_residual_poc_toyset.py --rows 14000 --candidate-features 5000
 ```
 
 이 명령은 아래 경로에 같은 구조의 toyset을 만듭니다.
