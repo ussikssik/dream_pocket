@@ -5566,7 +5566,8 @@ if BLOCK_EXPERIMENT_ENABLED:
         block_ranking_frames.append(block_ranking)
         display(block_ranking.head(20))
 
-        block_plot_frame = block_ranking.rename(columns={"block_id": "feature_name"}).copy()
+        block_plot_frame = block_ranking.copy()
+        block_plot_frame["feature_name"] = block_plot_frame["block_id"].astype(str)
         fig = plot_candidate_loss_ranking(
             block_plot_frame,
             output_path=BLOCK_EXPERIMENT_DIR / f"{defect_id}_block_ranking.png",
