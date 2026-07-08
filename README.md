@@ -20,8 +20,8 @@ notebooks/residual_feature_boosting_poc.ipynb
 
 ```python
 USE_DEMO_DATA = True
-DEMO_N_WAFERS = 14_000
-DEMO_N_CANDIDATE_FEATURES = 5_000
+DEMO_N_WAFERS = 2_000
+DEMO_N_CANDIDATE_FEATURES = 100
 ```
 
 처음 빠르게 동작만 확인하고 싶으면 예를 들어 이렇게 줄여서 실행하세요.
