@@ -428,8 +428,16 @@ def _plot_loss_axis(
         ax.set_axis_off()
         return
 
-    work = ranking_df.dropna(subset=[metric_col]).copy()
-    work[metric_col] = pd.to_numeric(work[metric_col], errors="coerce")
+    source = ranking_df.copy()
+    source[metric_col] = pd.to_numeric(source[metric_col], errors="coerce")
+    source_answer_mask = pd.Series(False, index=source.index)
+    if answer_features and "feature_name" in source.columns:
+        source_answer_mask = source_answer_mask | answer_feature_mask(source["feature_name"], answer_features)
+    if answer_col in source.columns:
+        source_answer_mask = source_answer_mask | source[answer_col].fillna(False).astype(bool)
+    answer_rows_all = source[source_answer_mask].copy()
+
+    work = source.dropna(subset=[metric_col]).copy()
     work = work.dropna(subset=[metric_col]).sort_values([metric_col, "feature_name"]).reset_index(drop=True)
     if work.empty:
         ax.set_title(title)
@@ -456,9 +464,7 @@ def _plot_loss_axis(
     if answer_col in work.columns:
         answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
     answers = work[answer_mask]
-    answer_requested = bool(answer_features)
-    if answer_col in ranking_df.columns:
-        answer_requested = answer_requested or bool(ranking_df[answer_col].fillna(False).astype(bool).any())
+    answer_requested = bool(answer_features) or not answer_rows_all.empty
     if not answers.empty:
         answer_x = answers.index.to_numpy() + 1
         ax.scatter(
@@ -482,7 +488,41 @@ def _plot_loss_axis(
                 color="#2a9d8f",
                 fontweight="bold",
             )
-    elif answer_requested:
+    missing_metric_answers = answer_rows_all[pd.to_numeric(answer_rows_all[metric_col], errors="coerce").isna()]
+    if not missing_metric_answers.empty:
+        y_min, y_max = ax.get_ylim()
+        y_span = y_max - y_min if y_max > y_min else 1.0
+        marker_y = y_max - 0.06 * y_span
+        marker_x_values = []
+        for _, row in missing_metric_answers.iterrows():
+            xpos = _answer_rank_x(row, fallback=len(work) + 1)
+            marker_x_values.append(xpos)
+            ax.axvline(xpos, color="#2a9d8f", linestyle=":", linewidth=1.0, alpha=0.8)
+            ax.scatter(
+                [xpos],
+                [marker_y],
+                marker="X",
+                s=220,
+                color="#2a9d8f",
+                edgecolors="#0b3d35",
+                linewidths=1.4,
+                label="answer feature (metric NaN)",
+                zorder=7,
+            )
+            reason = str(row.get("fail_reason", "") or row.get("overfit_guard_reason", "") or "metric NaN")
+            ax.annotate(
+                f"ANSWER rank {int(xpos)}\n{str(row.get('feature_name', ''))[:24]}\n{reason[:34]}",
+                (xpos, marker_y),
+                textcoords="offset points",
+                xytext=(7, -18),
+                fontsize=8,
+                color="#2a9d8f",
+                fontweight="bold",
+            )
+        if marker_x_values:
+            left, right = ax.get_xlim()
+            ax.set_xlim(left=min(left, 0.5), right=max(right, max(marker_x_values) + 1.0))
+    if answers.empty and missing_metric_answers.empty and answer_requested:
         ax.text(
             0.02,
             0.96,
@@ -501,6 +541,14 @@ def _plot_loss_axis(
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8)
+
+
+def _answer_rank_x(row: pd.Series, *, fallback: int) -> int:
+    try:
+        value = int(row.get("rank", fallback))
+    except (TypeError, ValueError):
+        return int(fallback)
+    return value if value > 0 else int(fallback)
 
 
 def _plot_final_metric_axis(ax, split_df: pd.DataFrame, metric: str, split: str) -> None:
