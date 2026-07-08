@@ -198,16 +198,40 @@ class ResidualFeatureBooster:
             "feature_name": feature,
             "valid_bad_rmse_reduction": np.nan,
             "valid_bad_mae_reduction": np.nan,
+            "valid_bad_rmse_before": np.nan,
+            "valid_bad_rmse_after": np.nan,
+            "valid_bad_mae_before": np.nan,
+            "valid_bad_mae_after": np.nan,
             "valid_good_rmse_reduction": np.nan,
             "valid_good_mae_reduction": np.nan,
+            "valid_good_rmse_before": np.nan,
+            "valid_good_rmse_after": np.nan,
+            "valid_good_mae_before": np.nan,
+            "valid_good_mae_after": np.nan,
             "valid_global_rmse_reduction": np.nan,
             "valid_global_mae_reduction": np.nan,
+            "valid_global_rmse_before": np.nan,
+            "valid_global_rmse_after": np.nan,
+            "valid_global_mae_before": np.nan,
+            "valid_global_mae_after": np.nan,
             "test_bad_rmse_reduction": np.nan,
             "test_bad_mae_reduction": np.nan,
+            "test_bad_rmse_before": np.nan,
+            "test_bad_rmse_after": np.nan,
+            "test_bad_mae_before": np.nan,
+            "test_bad_mae_after": np.nan,
             "test_good_rmse_reduction": np.nan,
             "test_good_mae_reduction": np.nan,
+            "test_good_rmse_before": np.nan,
+            "test_good_rmse_after": np.nan,
+            "test_good_mae_before": np.nan,
+            "test_good_mae_after": np.nan,
             "test_global_rmse_reduction": np.nan,
             "test_global_mae_reduction": np.nan,
+            "test_global_rmse_before": np.nan,
+            "test_global_rmse_after": np.nan,
+            "test_global_mae_before": np.nan,
+            "test_global_mae_after": np.nan,
             "missing_rate": np.nan,
             "bad_coverage": np.nan,
             "good_coverage": np.nan,
@@ -331,7 +355,11 @@ def _reduction_columns(
     result: dict[str, float] = {}
     for name, mask in groups.items():
         values = residual_reduction_metrics(y[mask], before[mask], after[mask])
+        result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
+        result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
         result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
+        result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
+        result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
         result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
     return result
 
@@ -363,11 +391,17 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "defect_id",
         "round",
         "feature_name",
+        "valid_bad_rmse_before",
+        "valid_bad_rmse_after",
         "valid_bad_rmse_reduction",
+        "test_bad_rmse_before",
+        "test_bad_rmse_after",
         "test_bad_rmse_reduction",
         "valid_good_rmse_reduction",
         "test_good_rmse_reduction",
+        "valid_global_rmse_after",
         "valid_global_rmse_reduction",
+        "test_global_rmse_after",
         "test_global_rmse_reduction",
     ]
     return {key: row.get(key, np.nan) for key in keys}
