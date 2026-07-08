@@ -9,6 +9,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .answer_features import answer_feature_mask
 from .metrics import mae, rmse
 
 
@@ -89,7 +90,7 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, list[str] | set[str]] | None = None) -> None:
+def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, Any] | None = None) -> None:
     if curve.empty:
         return
     try:
@@ -100,11 +101,11 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_b
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
         ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
-        answer_features = set(answer_features_by_defect.get(str(defect_id), [])) if answer_features_by_defect else set()
-        if answer_features and "selected_feature" in group.columns:
-            answers = group[group["selected_feature"].astype(str).isin(answer_features)]
+        answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
+        if answer_rules and "selected_feature" in group.columns:
+            answers = group[answer_feature_mask(group["selected_feature"], answer_rules)]
             if not answers.empty:
-                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="*", s=170, color="#2a9d8f", label="answer feature", zorder=5)
+                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
                 for _, row in answers.iterrows():
                     ax.annotate(
                         str(row.get("selected_feature", ""))[:24],
@@ -284,6 +285,7 @@ def plot_round_residual_points(
     *,
     output_path: str | Path | None = None,
     title: str = "round mean absolute residual",
+    answer_features_by_defect: dict[str, Any] | None = None,
 ):
     """Plot round 0/1/2/... average residual points by defect."""
     if summary.empty:
@@ -303,6 +305,19 @@ def plot_round_residual_points(
         for defect_id, group_df in work.groupby("defect_id", sort=False):
             group_df = group_df.sort_values("round")
             ax.plot(group_df["round"], group_df["mean_abs_residual"], marker="o", linewidth=1.7, label=str(defect_id))
+            answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
+            if answer_rules and "selected_feature" in group_df.columns:
+                answers = group_df[answer_feature_mask(group_df["selected_feature"], answer_rules)]
+                if not answers.empty:
+                    ax.scatter(
+                        answers["round"],
+                        answers["mean_abs_residual"],
+                        marker="X",
+                        s=95,
+                        color="#2a9d8f",
+                        label=f"{defect_id} answer",
+                        zorder=6,
+                    )
             for _, row in group_df.iterrows():
                 if int(row["round"]) == 0:
                     continue
@@ -366,7 +381,7 @@ def plot_candidate_loss_ranking(
     global_metric_col: str = "valid_global_rmse_after_over_baseline",
     bad_metric_col: str = "valid_bad_rmse_after_over_baseline",
     selected_col: str = "selected",
-    answer_features: list[str] | set[str] | None = None,
+    answer_features: Any = None,
     answer_col: str = "is_answer_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
@@ -402,7 +417,7 @@ def _plot_loss_axis(
     ax,
     title: str,
     selected_col: str,
-    answer_features: list[str] | set[str] | None,
+    answer_features: Any,
     answer_col: str,
 ) -> None:
     if metric_col not in ranking_df.columns:
@@ -433,10 +448,9 @@ def _plot_loss_axis(
             for xpos, (_, row) in zip(selected_x, selected.iterrows()):
                 ax.annotate(f"rank {int(xpos)}", (xpos, row[metric_col]), textcoords="offset points", xytext=(5, 5), fontsize=8, color="#e76f51")
 
-    answer_set = set(answer_features or [])
     answer_mask = pd.Series(False, index=work.index)
-    if answer_set and "feature_name" in work.columns:
-        answer_mask = answer_mask | work["feature_name"].astype(str).isin(answer_set)
+    if answer_features and "feature_name" in work.columns:
+        answer_mask = answer_mask | answer_feature_mask(work["feature_name"], answer_features)
     if answer_col in work.columns:
         answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
     answers = work[answer_mask]

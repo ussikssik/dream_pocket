@@ -12,6 +12,7 @@ TEXT_FILES = [
     "requirements.txt",
     "configs/experiment.yaml",
     "feature_boosting/__init__.py",
+    "feature_boosting/answer_features.py",
     "feature_boosting/baseline_model.py",
     "feature_boosting/cli.py",
     "feature_boosting/config.py",

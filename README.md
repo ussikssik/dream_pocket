@@ -50,7 +50,12 @@ BOOSTING_MAX_SELECT_PER_ROUND = None
 
 ```python
 ANSWER_FEATURES = {
-    "defect_1": ["known_root_cause_a", "known_root_cause_b"],
+    "defect_1": [
+        "known_root_cause_a",                  # exact feature name
+        {"contains_all": ["abc", "step2"]},    # contains both abc and step2
+        {"contains_any": ["root", "defect"]},  # contains one of these words
+        {"regex": r"abc.*step2"},
+    ],
     "defect_2": ["known_root_cause_c"],
 }
 ```

@@ -12,6 +12,7 @@ GPT에게 붙여넣을 때는 먼저 이렇게 요청하면 됩니다:
 - requirements.txt
 - configs/experiment.yaml
 - feature_boosting/__init__.py
+- feature_boosting/answer_features.py
 - feature_boosting/baseline_model.py
 - feature_boosting/cli.py
 - feature_boosting/config.py
@@ -89,7 +90,12 @@ BOOSTING_MAX_SELECT_PER_ROUND = None
 
 ```python
 ANSWER_FEATURES = {
-    "defect_1": ["known_root_cause_a", "known_root_cause_b"],
+    "defect_1": [
+        "known_root_cause_a",                  # exact feature name
+        {"contains_all": ["abc", "step2"]},    # contains both abc and step2
+        {"contains_any": ["root", "defect"]},  # contains one of these words
+        {"regex": r"abc.*step2"},
+    ],
     "defect_2": ["known_root_cause_c"],
 }
 ```
@@ -629,6 +635,126 @@ __all__ = [
     "train_baseline_model",
     "train_final_model",
 ]
+
+
+====================================================================================================
+FILE: feature_boosting/answer_features.py
+====================================================================================================
+from __future__ import annotations
+
+import re
+from typing import Any
+
+import pandas as pd
+
+
+AnswerRule = str | dict[str, Any]
+
+
+def answer_feature_mask(feature_names: pd.Series, rules: list[AnswerRule] | set[str] | tuple[AnswerRule, ...] | None) -> pd.Series:
+    """Return True for feature names matching answer-feature rules.
+
+    Supported rules:
+    - "exact_feature_name"
+    - {"exact": "feature_name"} or {"exact": ["a", "b"]}
+    - {"contains": "abc"} or {"contains": ["abc", "step2"]}  # all tokens
+    - {"contains_all": ["abc", "step2"]}
+    - {"contains_any": ["abc", "step2"]}
+    - {"regex": r"abc.*step2"} or {"regex": [r"a", r"b"]}
+
+    Matching is case-insensitive by default. Add {"case_sensitive": True}
+    inside a dict rule when exact case matters.
+    """
+    if rules is None:
+        return pd.Series(False, index=feature_names.index)
+    normalized_rules = list(rules)
+    if not normalized_rules:
+        return pd.Series(False, index=feature_names.index)
+    return feature_names.astype(str).apply(lambda name: any(_matches_rule(name, rule) for rule in normalized_rules))
+
+
+def answer_feature_match_reason(feature_name: str, rules: list[AnswerRule] | set[str] | tuple[AnswerRule, ...] | None) -> str:
+    if rules is None:
+        return ""
+    for rule in list(rules):
+        if _matches_rule(str(feature_name), rule):
+            return _rule_label(rule)
+    return ""
+
+
+def add_answer_feature_flags(
+    frame: pd.DataFrame,
+    *,
+    feature_col: str,
+    rules: list[AnswerRule] | set[str] | tuple[AnswerRule, ...] | None,
+    flag_col: str = "is_answer_feature",
+    reason_col: str = "answer_match_rule",
+) -> pd.DataFrame:
+    result = frame.copy()
+    if feature_col not in result.columns:
+        result[flag_col] = False
+        result[reason_col] = ""
+        return result
+    result[flag_col] = answer_feature_mask(result[feature_col], rules)
+    result[reason_col] = [
+        answer_feature_match_reason(feature_name, rules) if is_answer else ""
+        for feature_name, is_answer in zip(result[feature_col].astype(str), result[flag_col])
+    ]
+    return result
+
+
+def _matches_rule(feature_name: str, rule: AnswerRule) -> bool:
+    if isinstance(rule, str):
+        return feature_name == rule
+    if not isinstance(rule, dict):
+        return False
+
+    case_sensitive = bool(rule.get("case_sensitive", False))
+    name = feature_name if case_sensitive else feature_name.lower()
+
+    exact_values = _as_list(rule.get("exact"))
+    if exact_values and any(name == _normalize_token(item, case_sensitive) for item in exact_values):
+        return True
+
+    contains_values = _as_list(rule.get("contains"))
+    if contains_values and all(_normalize_token(item, case_sensitive) in name for item in contains_values):
+        return True
+
+    contains_all_values = _as_list(rule.get("contains_all"))
+    if contains_all_values and all(_normalize_token(item, case_sensitive) in name for item in contains_all_values):
+        return True
+
+    contains_any_values = _as_list(rule.get("contains_any"))
+    if contains_any_values and any(_normalize_token(item, case_sensitive) in name for item in contains_any_values):
+        return True
+
+    regex_values = _as_list(rule.get("regex"))
+    flags = 0 if case_sensitive else re.IGNORECASE
+    return bool(regex_values and any(re.search(str(pattern), feature_name, flags=flags) for pattern in regex_values))
+
+
+def _as_list(value: Any) -> list[Any]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple, set)):
+        return list(value)
+    return [value]
+
+
+def _normalize_token(value: Any, case_sensitive: bool) -> str:
+    text = str(value)
+    return text if case_sensitive else text.lower()
+
+
+def _rule_label(rule: AnswerRule) -> str:
+    if isinstance(rule, str):
+        return f"exact:{rule}"
+    if not isinstance(rule, dict):
+        return str(rule)
+    for key in ("exact", "contains", "contains_all", "contains_any", "regex"):
+        if key in rule:
+            return f"{key}:{rule[key]}"
+    return str(rule)
 
 
 ====================================================================================================
@@ -1682,6 +1808,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from .answer_features import answer_feature_mask
 from .metrics import mae, rmse
 
 
@@ -1762,7 +1889,7 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, list[str] | set[str]] | None = None) -> None:
+def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, Any] | None = None) -> None:
     if curve.empty:
         return
     try:
@@ -1773,11 +1900,11 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_b
         fig, ax = plt.subplots(figsize=(8, 4))
         ax.plot(group["round"], group["valid_bad_rmse"], marker="o", label="valid bad RMSE")
         ax.plot(group["round"], group["test_bad_rmse"], marker="o", label="test bad RMSE")
-        answer_features = set(answer_features_by_defect.get(str(defect_id), [])) if answer_features_by_defect else set()
-        if answer_features and "selected_feature" in group.columns:
-            answers = group[group["selected_feature"].astype(str).isin(answer_features)]
+        answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
+        if answer_rules and "selected_feature" in group.columns:
+            answers = group[answer_feature_mask(group["selected_feature"], answer_rules)]
             if not answers.empty:
-                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="*", s=170, color="#2a9d8f", label="answer feature", zorder=5)
+                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
                 for _, row in answers.iterrows():
                     ax.annotate(
                         str(row.get("selected_feature", ""))[:24],
@@ -1957,6 +2084,7 @@ def plot_round_residual_points(
     *,
     output_path: str | Path | None = None,
     title: str = "round mean absolute residual",
+    answer_features_by_defect: dict[str, Any] | None = None,
 ):
     """Plot round 0/1/2/... average residual points by defect."""
     if summary.empty:
@@ -1976,6 +2104,19 @@ def plot_round_residual_points(
         for defect_id, group_df in work.groupby("defect_id", sort=False):
             group_df = group_df.sort_values("round")
             ax.plot(group_df["round"], group_df["mean_abs_residual"], marker="o", linewidth=1.7, label=str(defect_id))
+            answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
+            if answer_rules and "selected_feature" in group_df.columns:
+                answers = group_df[answer_feature_mask(group_df["selected_feature"], answer_rules)]
+                if not answers.empty:
+                    ax.scatter(
+                        answers["round"],
+                        answers["mean_abs_residual"],
+                        marker="X",
+                        s=95,
+                        color="#2a9d8f",
+                        label=f"{defect_id} answer",
+                        zorder=6,
+                    )
             for _, row in group_df.iterrows():
                 if int(row["round"]) == 0:
                     continue
@@ -2039,7 +2180,7 @@ def plot_candidate_loss_ranking(
     global_metric_col: str = "valid_global_rmse_after_over_baseline",
     bad_metric_col: str = "valid_bad_rmse_after_over_baseline",
     selected_col: str = "selected",
-    answer_features: list[str] | set[str] | None = None,
+    answer_features: Any = None,
     answer_col: str = "is_answer_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
@@ -2075,7 +2216,7 @@ def _plot_loss_axis(
     ax,
     title: str,
     selected_col: str,
-    answer_features: list[str] | set[str] | None,
+    answer_features: Any,
     answer_col: str,
 ) -> None:
     if metric_col not in ranking_df.columns:
@@ -2106,10 +2247,9 @@ def _plot_loss_axis(
             for xpos, (_, row) in zip(selected_x, selected.iterrows()):
                 ax.annotate(f"rank {int(xpos)}", (xpos, row[metric_col]), textcoords="offset points", xytext=(5, 5), fontsize=8, color="#e76f51")
 
-    answer_set = set(answer_features or [])
     answer_mask = pd.Series(False, index=work.index)
-    if answer_set and "feature_name" in work.columns:
-        answer_mask = answer_mask | work["feature_name"].astype(str).isin(answer_set)
+    if answer_features and "feature_name" in work.columns:
+        answer_mask = answer_mask | answer_feature_mask(work["feature_name"], answer_features)
     if answer_col in work.columns:
         answer_mask = answer_mask | work[answer_col].fillna(False).astype(bool)
     answers = work[answer_mask]
@@ -3108,6 +3248,7 @@ TEXT_FILES = [
     "requirements.txt",
     "configs/experiment.yaml",
     "feature_boosting/__init__.py",
+    "feature_boosting/answer_features.py",
     "feature_boosting/baseline_model.py",
     "feature_boosting/cli.py",
     "feature_boosting/config.py",
@@ -3774,6 +3915,7 @@ os.chdir(ROOT)
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from feature_boosting.answer_features import add_answer_feature_flags
 from feature_boosting.baseline_model import add_baseline_predictions, metrics_by_split, train_baseline_model
 from feature_boosting.data_loader import align_base_and_candidates, candidate_feature_cols, load_base_dataset, load_base_feature_cols, load_candidate_features, load_group_ids, standardize_six_file_inputs
 from feature_boosting.final_model import evaluate_model_by_groups, predict_final, train_final_model
@@ -3948,9 +4090,15 @@ BOOSTING_PROGRESS_EVERY = 100
 CANDIDATE_LOSS_GLOBAL_METRIC_COL = "valid_global_rmse_after_over_baseline"
 CANDIDATE_LOSS_BAD_METRIC_COL = "valid_bad_rmse_after_over_baseline"
 
-# Optional known answer features per defect. Replace these with real root-cause features in actual data.
+# Optional known answer features per defect.
+# You can mix exact names and flexible matching rules.
+# Examples:
+# - "exact_feature_name"
+# - {"contains_all": ["abc", "step2"]}  # feature name contains both abc and step2
+# - {"contains_any": ["abc", "defect"]}
+# - {"regex": r"abc.*step2"}
 ANSWER_FEATURES = {
-    "defect_1": ["hidden_defect_1"],
+    "defect_1": ["hidden_defect_1", {"contains_all": ["hidden", "1"]}],
     "defect_2": ["hidden_defect_2"],
     "defect_3": [],
 }
@@ -4289,14 +4437,13 @@ for defect in DEFECTS:
         output_dir=OUT_DIR / "rankings",
     )
 
-    answer_features = set(ANSWER_FEATURES.get(defect_id, []))
+    answer_rules = ANSWER_FEATURES.get(defect_id, [])
 
     if result.rankings:
         for ranking_df in result.rankings:
             if ranking_df.empty or "round" not in ranking_df.columns:
                 continue
-            ranking_df = ranking_df.copy()
-            ranking_df["is_answer_feature"] = ranking_df["feature_name"].astype(str).isin(answer_features)
+            ranking_df = add_answer_feature_flags(ranking_df, feature_col="feature_name", rules=answer_rules)
             round_no = int(ranking_df["round"].max())
             write_csv(ranking_df, OUT_DIR / "rankings" / f"{defect_id}_round_{round_no}.csv")
             fig = plot_candidate_loss_ranking(
@@ -4304,23 +4451,21 @@ for defect in DEFECTS:
                 output_path=OUT_DIR / "plots" / f"{defect_id}_round_{round_no}_candidate_loss.png",
                 global_metric_col=CANDIDATE_LOSS_GLOBAL_METRIC_COL,
                 bad_metric_col=CANDIDATE_LOSS_BAD_METRIC_COL,
-                answer_features=answer_features,
+                answer_features=answer_rules,
                 title_prefix=f"{defect_id} round {round_no}",
             )
             if fig is not None:
                 display(fig)
 
     if not result.selected_features.empty:
-        selected_for_defect = result.selected_features.copy()
-        selected_for_defect["is_answer_feature"] = selected_for_defect["feature_name"].astype(str).isin(answer_features)
+        selected_for_defect = add_answer_feature_flags(result.selected_features, feature_col="feature_name", rules=answer_rules)
         selected_frames.append(selected_for_defect)
         display(selected_for_defect)
     else:
         print(defect_id, "selected no feature")
 
     if not result.residual_curve.empty:
-        curve_for_defect = result.residual_curve.copy()
-        curve_for_defect["is_answer_feature"] = curve_for_defect["selected_feature"].astype(str).isin(answer_features)
+        curve_for_defect = add_answer_feature_flags(result.residual_curve, feature_col="selected_feature", rules=answer_rules)
         curve_frames.append(curve_for_defect)
 
 quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
@@ -4337,6 +4482,7 @@ write_csv(round_mean_residual, OUT_DIR / "round_mean_residual_summary.csv")
 fig = plot_round_residual_points(
     round_mean_residual,
     output_path=OUT_DIR / "plots" / "round_mean_abs_residual_points.png",
+    answer_features_by_defect=ANSWER_FEATURES,
 )
 if fig is not None:
     display(fig)
