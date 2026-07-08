@@ -3466,7 +3466,7 @@ import pandas as pd
 from .config import FeatureFilterConfig
 
 
-LEAKAGE_TOKENS = ("target", "yield", "label", "bad", "good", "defect", "group")
+LEAKAGE_TOKENS = ("target", "yield", "label")
 
 
 def validate_input_columns(
@@ -4382,6 +4382,29 @@ class ValidationTests(unittest.TestCase):
         self.assertTrue(bool(summary.loc["signal_feature", "is_pass"]))
         self.assertIn("constant_feature", summary.loc["constant", "fail_reason"])
         self.assertIn("high_missing_rate", summary.loc["mostly_missing", "fail_reason"])
+
+    def test_defect_named_candidate_is_not_automatically_leakage(self) -> None:
+        df = pd.DataFrame(
+            {
+                "sample_id": ["a", "b", "c", "d", "e", "f"],
+                "split": ["train", "train", "valid", "valid", "test", "test"],
+                "hidden_defect_1": [1, 2, 3, 4, 5, 6],
+                "yield_target_like": [1, 2, 3, 4, 5, 6],
+            }
+        )
+        summary = profile_candidate_features(
+            df,
+            ["hidden_defect_1", "yield_target_like"],
+            id_col="sample_id",
+            split_col="split",
+            bad_ids={"c", "e"},
+            good_ids={"d", "f"},
+            config=FeatureFilterConfig(max_missing_rate=0.5, min_unique_values=2, min_bad_coverage=0.5, min_good_coverage=0.5),
+        ).set_index("feature_name")
+
+        self.assertNotIn("leakage_like_feature", str(summary.loc["hidden_defect_1", "fail_reason"]))
+        self.assertTrue(bool(summary.loc["hidden_defect_1", "is_pass"]))
+        self.assertIn("leakage_like_feature", str(summary.loc["yield_target_like", "fail_reason"]))
 
 
 if __name__ == "__main__":

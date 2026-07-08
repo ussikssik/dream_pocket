@@ -9,7 +9,7 @@ import pandas as pd
 from .config import FeatureFilterConfig
 
 
-LEAKAGE_TOKENS = ("target", "yield", "label", "bad", "good", "defect", "group")
+LEAKAGE_TOKENS = ("target", "yield", "label")
 
 
 def validate_input_columns(
