@@ -4732,37 +4732,45 @@ DEFECTS = [
     },
 ]
 
-# Six-file raw input mode. Change these paths and column names to match your files.
-RAW_Y_PATH = ROOT / "data" / "raw" / "y.csv"
-RAW_CANDIDATE_PATH = ROOT / "data" / "raw" / "candidate_features.csv"
-RAW_BASE_FEATURE_PATH = ROOT / "data" / "raw" / "base_features.csv"
+# Six-file raw input mode. Edit each file block independently.
+# Key rule per file:
+# - If lot_id and wf_id are separate columns: set combined_id_col=None, id_col=None.
+# - If one column such as lot_wf_id exists: set combined_id_col="lot_wf_id".
+# - Use id_col only when the file already has a final sample_id-like key that should not be split.
 RAW_STANDARDIZED_DIR = ROOT / "data" / "standardized_from_raw"
-
-# If a file has one combined key column like lot_wf_id, set the matching *_COMBINED_ID_COL to that column name.
-# The code splits it into RAW_*_LOT_COL and RAW_*_WF_COL using RAW_COMBINED_ID_SEP.
-# If *_COMBINED_ID_COL is None, the code uses the separate lot/wf columns directly.
-# Use *_ID_COL only when the file already has a final sample_id-like key that should not be split.
-RAW_Y_ID_COL = None
-RAW_CANDIDATE_ID_COL = None
-RAW_BASE_ID_COL = None
-RAW_Y_COMBINED_ID_COL = None
-RAW_CANDIDATE_COMBINED_ID_COL = None
-RAW_BASE_COMBINED_ID_COL = None
 RAW_COMBINED_ID_SEP = "_"
 
-RAW_Y_LOT_COL = "lot_id"
-RAW_Y_WF_COL = "wf_id"
-RAW_Y_TARGET_COL = "y"
-RAW_CANDIDATE_LOT_COL = "lot_id"
-RAW_CANDIDATE_WF_COL = "wf_id"
-RAW_BASE_LOT_COL = "lot_id"
-RAW_BASE_WF_COL = "wf_id"
+RAW_Y_FILE = {
+    "path": ROOT / "data" / "raw" / "y.csv",
+    "id_col": None,
+    "combined_id_col": None,
+    "lot_col": "lot_id",
+    "wf_col": "wf_id",
+    "target_col": "y",
+    "split_col": None,  # Set to train/valid/test column name if y.csv already has one.
+}
 
-# If the y file already has train/valid/test, put that column name here. Otherwise set None.
-RAW_SPLIT_SOURCE_COL = None
-RAW_TRAIN_RATIO = 0.6
-RAW_VALID_RATIO = 0.2
-RAW_SPLIT_SEED = 42
+RAW_CANDIDATE_FILE = {
+    "path": ROOT / "data" / "raw" / "candidate_features.csv",
+    "id_col": None,
+    "combined_id_col": None,
+    "lot_col": "lot_id",
+    "wf_col": "wf_id",
+}
+
+RAW_BASE_FEATURE_FILE = {
+    "path": ROOT / "data" / "raw" / "base_features.csv",
+    "id_col": None,
+    "combined_id_col": None,
+    "lot_col": "lot_id",
+    "wf_col": "wf_id",
+}
+
+RAW_SPLIT = {
+    "train_ratio": 0.6,
+    "valid_ratio": 0.2,
+    "seed": 42,
+}
 
 RAW_DEFECT_GROUPS = [
     {
@@ -4974,32 +4982,32 @@ if USE_DEMO_DATA:
 
 elif USE_RAW_SIX_FILE_DATA:
     standardized = standardize_six_file_inputs(
-        y_path=RAW_Y_PATH,
-        candidate_path=RAW_CANDIDATE_PATH,
-        base_feature_path=RAW_BASE_FEATURE_PATH,
+        y_path=RAW_Y_FILE["path"],
+        candidate_path=RAW_CANDIDATE_FILE["path"],
+        base_feature_path=RAW_BASE_FEATURE_FILE["path"],
         defect_groups=RAW_DEFECT_GROUPS,
         output_dir=RAW_STANDARDIZED_DIR,
         id_col=ID_COL,
         target_col=TARGET_COL,
         split_col=SPLIT_COL,
-        y_lot_col=RAW_Y_LOT_COL,
-        y_wf_col=RAW_Y_WF_COL,
-        y_id_col=RAW_Y_ID_COL,
-        y_combined_id_col=RAW_Y_COMBINED_ID_COL,
-        y_target_col=RAW_Y_TARGET_COL,
-        candidate_lot_col=RAW_CANDIDATE_LOT_COL,
-        candidate_wf_col=RAW_CANDIDATE_WF_COL,
-        candidate_id_col=RAW_CANDIDATE_ID_COL,
-        candidate_combined_id_col=RAW_CANDIDATE_COMBINED_ID_COL,
-        base_lot_col=RAW_BASE_LOT_COL,
-        base_wf_col=RAW_BASE_WF_COL,
-        base_id_col=RAW_BASE_ID_COL,
-        base_combined_id_col=RAW_BASE_COMBINED_ID_COL,
+        y_lot_col=RAW_Y_FILE["lot_col"],
+        y_wf_col=RAW_Y_FILE["wf_col"],
+        y_id_col=RAW_Y_FILE["id_col"],
+        y_combined_id_col=RAW_Y_FILE["combined_id_col"],
+        y_target_col=RAW_Y_FILE["target_col"],
+        candidate_lot_col=RAW_CANDIDATE_FILE["lot_col"],
+        candidate_wf_col=RAW_CANDIDATE_FILE["wf_col"],
+        candidate_id_col=RAW_CANDIDATE_FILE["id_col"],
+        candidate_combined_id_col=RAW_CANDIDATE_FILE["combined_id_col"],
+        base_lot_col=RAW_BASE_FEATURE_FILE["lot_col"],
+        base_wf_col=RAW_BASE_FEATURE_FILE["wf_col"],
+        base_id_col=RAW_BASE_FEATURE_FILE["id_col"],
+        base_combined_id_col=RAW_BASE_FEATURE_FILE["combined_id_col"],
         combined_id_sep=RAW_COMBINED_ID_SEP,
-        split_source_col=RAW_SPLIT_SOURCE_COL,
-        train_ratio=RAW_TRAIN_RATIO,
-        valid_ratio=RAW_VALID_RATIO,
-        split_seed=RAW_SPLIT_SEED,
+        split_source_col=RAW_Y_FILE["split_col"],
+        train_ratio=RAW_SPLIT["train_ratio"],
+        valid_ratio=RAW_SPLIT["valid_ratio"],
+        split_seed=RAW_SPLIT["seed"],
     )
     BASE_DATASET_PATH = standardized["base_dataset"]
     CANDIDATE_FEATURES_PATH = standardized["candidate_features"]
