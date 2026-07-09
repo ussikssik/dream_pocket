@@ -2477,6 +2477,7 @@ def plot_candidate_loss_ranking(
     selected_col: str = "selected",
     answer_features: Any = None,
     answer_col: str = "is_answer_feature",
+    null_col: str = "is_null_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
     """Plot candidate rank vs after-boosting loss for global and bad groups.
@@ -2494,8 +2495,8 @@ def plot_candidate_loss_ranking(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), squeeze=False)
     axes = axes[0]
-    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col)
-    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col)
+    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col, null_col)
+    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col, null_col)
     fig.suptitle(title_prefix)
     fig.tight_layout()
     if output_path is not None:
@@ -2513,6 +2514,7 @@ def _plot_loss_axis(
     selected_col: str,
     answer_features: Any,
     answer_col: str,
+    null_col: str,
 ) -> None:
     if metric_col not in ranking_df.columns:
         ax.set_title(title)
@@ -2541,6 +2543,22 @@ def _plot_loss_axis(
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
     if "over_baseline" in metric_col:
         ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
+
+    if null_col in work.columns:
+        null_features = work[work[null_col].fillna(False).astype(bool)]
+        if not null_features.empty:
+            null_x = null_features.index.to_numpy() + 1
+            ax.scatter(
+                null_x,
+                null_features[metric_col],
+                marker="X",
+                s=90,
+                color="#f4a261",
+                edgecolors="#7a3e00",
+                linewidths=0.9,
+                label="null/noise feature",
+                zorder=4,
+            )
 
     if selected_col in work.columns:
         selected = work[work[selected_col].astype(bool)]
@@ -5352,6 +5370,7 @@ real candidate feature와 random/noise feature를 같은 boosting 후보군에 �
 - 기존 6번 결과는 건드리지 않고, 별도 실험으로 `candidate feature + null noise feature`를 다시 boosting합니다.
 - PowerSHAP처럼 null feature를 기준선으로 쓰지만, SHAP importance가 아니라 residual improvement metric으로 비교합니다.
 - round마다 real feature와 noise feature가 같은 residual 상태에서 같이 경쟁하므로, 후반 round가 noise 수준인지 판단하기 좋습니다.
+- 6번과 같은 feature rank curve를 그리고, noise feature 위치는 주황색 X 마커로 표시합니다.
 - `null_selected_by_boosting`이 나오거나 top rank에 noise가 자주 들어오면, 해당 round 이후 feature 선택은 약하게 해석해야 합니다.
 
 --- CELL 15 [code] ---
@@ -5360,6 +5379,7 @@ NULL_BENCHMARK_N_ROUNDS = BOOSTING_N_ROUNDS
 NULL_BENCHMARK_N_NOISE_FEATURES = 30
 NULL_BENCHMARK_RANDOM_SEED = 2026
 NULL_BENCHMARK_TOP_N_DISPLAY = 30
+NULL_BENCHMARK_DISPLAY_RANK_CURVES = True
 NULL_BENCHMARK_METRIC = BOOSTING_SELECTION_METRIC
 NULL_BENCHMARK_USE_TEST_FOR_SELECTION = False
 NULL_BENCHMARK_NOISE_PREFIX = "__null_noise_"
@@ -5543,6 +5563,18 @@ if NULL_BENCHMARK_ENABLED:
             top_n = ranking.head(int(NULL_BENCHMARK_TOP_N_DISPLAY)).copy()
             null_competition_top_frames.append(top_n)
             null_competition_ranking_frames.append(ranking)
+
+            if NULL_BENCHMARK_DISPLAY_RANK_CURVES:
+                fig = plot_candidate_loss_ranking(
+                    ranking,
+                    output_path=NULL_BENCHMARK_DIR / "plots" / f"{defect_id}_round_{round_no}_null_competition_rank_curve.png",
+                    global_metric_col=CANDIDATE_LOSS_GLOBAL_METRIC_COL,
+                    bad_metric_col=CANDIDATE_LOSS_BAD_METRIC_COL,
+                    answer_features=ANSWER_FEATURES.get(defect_id, []),
+                    title_prefix=f"{defect_id} round {round_no} null competition",
+                )
+                if fig is not None:
+                    display(fig)
 
             eligible = ranking[ranking["eligible_for_null_benchmark"]].copy()
             real_eligible = eligible[eligible["feature_type"].eq("real")].copy()

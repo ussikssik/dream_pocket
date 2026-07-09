@@ -385,6 +385,7 @@ def plot_candidate_loss_ranking(
     selected_col: str = "selected",
     answer_features: Any = None,
     answer_col: str = "is_answer_feature",
+    null_col: str = "is_null_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
     """Plot candidate rank vs after-boosting loss for global and bad groups.
@@ -402,8 +403,8 @@ def plot_candidate_loss_ranking(
 
     fig, axes = plt.subplots(1, 2, figsize=(16, 4.5), squeeze=False)
     axes = axes[0]
-    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col)
-    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col)
+    _plot_loss_axis(ranking_df, global_metric_col, axes[0], "all wafers", selected_col, answer_features, answer_col, null_col)
+    _plot_loss_axis(ranking_df, bad_metric_col, axes[1], "bad group", selected_col, answer_features, answer_col, null_col)
     fig.suptitle(title_prefix)
     fig.tight_layout()
     if output_path is not None:
@@ -421,6 +422,7 @@ def _plot_loss_axis(
     selected_col: str,
     answer_features: Any,
     answer_col: str,
+    null_col: str,
 ) -> None:
     if metric_col not in ranking_df.columns:
         ax.set_title(title)
@@ -449,6 +451,22 @@ def _plot_loss_axis(
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
     if "over_baseline" in metric_col:
         ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
+
+    if null_col in work.columns:
+        null_features = work[work[null_col].fillna(False).astype(bool)]
+        if not null_features.empty:
+            null_x = null_features.index.to_numpy() + 1
+            ax.scatter(
+                null_x,
+                null_features[metric_col],
+                marker="X",
+                s=90,
+                color="#f4a261",
+                edgecolors="#7a3e00",
+                linewidths=0.9,
+                label="null/noise feature",
+                zorder=4,
+            )
 
     if selected_col in work.columns:
         selected = work[work[selected_col].astype(bool)]
