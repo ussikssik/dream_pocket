@@ -87,6 +87,59 @@ class DataLoaderTests(unittest.TestCase):
             self.assertEqual({"L1_2", "L2_2"}, set(good_df["sample_id"].astype(str)))
             self.assertEqual({"train", "valid", "test"}, set(base_df["split"].astype(str)))
 
+    def test_standardize_six_file_inputs_with_combined_id_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            y_path = root / "y.csv"
+            candidate_path = root / "candidate.csv"
+            base_path = root / "base.csv"
+            group_path = root / "group.csv"
+            output_dir = root / "standardized"
+
+            sample_ids = ["L1_1", "L1_2", "L2_1", "L2_2", "L3_1", "L3_2"]
+            pd.DataFrame({"lot_wf": sample_ids, "target_y": [80, 81, 78, 79, 82, 83]}).to_csv(y_path, index=False)
+            pd.DataFrame({"lot_wf": sample_ids, "cand_a": [1, 2, 3, 4, 5, 6]}).to_csv(candidate_path, index=False)
+            pd.DataFrame({"lot_wf": sample_ids, "base_a": [10, 11, 12, 13, 14, 15]}).to_csv(base_path, index=False)
+            pd.DataFrame(
+                {
+                    "lot_wf": ["L1_1", "L1_2", "L2_1", "L2_2"],
+                    "judgement": ["bad", "good", "bad", "good"],
+                }
+            ).to_csv(group_path, index=False)
+
+            result = standardize_six_file_inputs(
+                y_path=y_path,
+                candidate_path=candidate_path,
+                base_feature_path=base_path,
+                defect_groups=[
+                    {
+                        "defect_id": "defect_a",
+                        "group_path": group_path,
+                        "combined_id_col": "lot_wf",
+                        "label_col": "judgement",
+                    }
+                ],
+                output_dir=output_dir,
+                y_lot_col="lot_id",
+                y_wf_col="wf_id",
+                y_combined_id_col="lot_wf",
+                y_target_col="target_y",
+                candidate_lot_col="lot_id",
+                candidate_wf_col="wf_id",
+                candidate_combined_id_col="lot_wf",
+                base_lot_col="lot_id",
+                base_wf_col="wf_id",
+                base_combined_id_col="lot_wf",
+            )
+
+            base_df = pd.read_csv(result["base_dataset"])
+            candidate_df = pd.read_csv(result["candidate_features"])
+            bad_df = pd.read_csv(result["defects"][0]["bad_group_path"])
+
+            self.assertEqual({"sample_id", "yield", "split", "base_a"}, set(base_df.columns))
+            self.assertEqual({"sample_id", "cand_a"}, set(candidate_df.columns))
+            self.assertEqual({"L1_1", "L2_1"}, set(bad_df["sample_id"].astype(str)))
+
 
 if __name__ == "__main__":
     unittest.main()
