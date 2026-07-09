@@ -5347,16 +5347,16 @@ display(standard_runtime_summary)
 --- CELL 14 [markdown] ---
 ## 6-1. Null Feature Benchmark
 
-real candidate feature가 random/noise feature보다 확실히 좋은 rank와 score를 내는지 확인합니다.
+real candidate feature와 random/noise feature를 같은 boosting 후보군에 넣고 경쟁시켜, 실제 feature가 noise보다 강하게 선택되는지 확인합니다.
 
-- PowerSHAP과 비슷하게 null feature를 추가해 비교 기준선을 만듭니다.
-- 여기서는 SHAP importance가 아니라 residual improvement metric으로 비교합니다.
-- 기본값은 1라운드 baseline residual 기준입니다. 즉, base feature만 썼을 때 남은 residual을 기준으로 real feature와 noise feature를 비교합니다.
-- `best real`이 `best null`보다 확실히 좋아야 feature boosting rank를 더 신뢰할 수 있습니다.
+- 기존 6번 결과는 건드리지 않고, 별도 실험으로 `candidate feature + null noise feature`를 다시 boosting합니다.
+- PowerSHAP처럼 null feature를 기준선으로 쓰지만, SHAP importance가 아니라 residual improvement metric으로 비교합니다.
+- round마다 real feature와 noise feature가 같은 residual 상태에서 같이 경쟁하므로, 후반 round가 noise 수준인지 판단하기 좋습니다.
+- `null_selected_by_boosting`이 나오거나 top rank에 noise가 자주 들어오면, 해당 round 이후 feature 선택은 약하게 해석해야 합니다.
 
 --- CELL 15 [code] ---
 NULL_BENCHMARK_ENABLED = True
-NULL_BENCHMARK_REAL_ROUND = 1
+NULL_BENCHMARK_N_ROUNDS = BOOSTING_N_ROUNDS
 NULL_BENCHMARK_N_NOISE_FEATURES = 30
 NULL_BENCHMARK_RANDOM_SEED = 2026
 NULL_BENCHMARK_TOP_N_DISPLAY = 30
@@ -5390,10 +5390,10 @@ def _null_higher_is_better(metric, direction="auto"):
 
 def _make_null_noise_frame(df, *, n_noise_features, seed, prefix):
     rng = np.random.default_rng(seed)
-    noise_data = {}
-    for idx in range(int(n_noise_features)):
-        col = f"{prefix}{idx:03d}"
-        noise_data[col] = rng.normal(0.0, 1.0, len(df))
+    noise_data = {
+        f"{prefix}{idx:03d}": rng.normal(0.0, 1.0, len(df))
+        for idx in range(int(n_noise_features))
+    }
     return pd.DataFrame(noise_data, index=df.index)
 
 
@@ -5401,18 +5401,36 @@ def _attach_null_noise(df, noise_by_id):
     return df.join(noise_by_id, on=ID_COL)
 
 
-def _score_sign_adjusted(value, *, higher_is_better):
-    value = pd.to_numeric(pd.Series([value]), errors="coerce").iloc[0]
-    if not np.isfinite(value):
-        return np.nan
-    return value if higher_is_better else -value
+def _null_adjusted_score(values, *, higher_is_better):
+    numeric = pd.to_numeric(values, errors="coerce")
+    return numeric if higher_is_better else -numeric
+
+
+def _feature_type_from_name(series):
+    names = series.fillna("").astype(str)
+    return np.where(names.str.startswith(NULL_BENCHMARK_NOISE_PREFIX), "null", "real")
+
+
+def _feature_list_for_defect(frame, *, defect_id, feature_col="feature_name", feature_type=None):
+    if frame is None or frame.empty or "defect_id" not in frame.columns or feature_col not in frame.columns:
+        return []
+    work = frame[frame["defect_id"].astype(str) == str(defect_id)].copy()
+    if feature_type is not None and "feature_type" in work.columns:
+        work = work[work["feature_type"].astype(str) == str(feature_type)]
+    values = work[feature_col].dropna().astype(str).tolist()
+    return list(dict.fromkeys(values))
 
 
 if NULL_BENCHMARK_ENABLED:
-    null_metric_col = _null_metric_name(NULL_BENCHMARK_METRIC, use_test_for_selection=NULL_BENCHMARK_USE_TEST_FOR_SELECTION)
+    null_metric_col = _null_metric_name(
+        NULL_BENCHMARK_METRIC,
+        use_test_for_selection=NULL_BENCHMARK_USE_TEST_FOR_SELECTION,
+    )
     null_higher_is_better = _null_higher_is_better(null_metric_col, BOOSTING_SELECTION_DIRECTION)
     print("NULL_BENCHMARK_DIR =", NULL_BENCHMARK_DIR)
+    print("NULL_BENCHMARK_MODE = real candidates + null noise candidates compete in the same boosting run")
     print("NULL_BENCHMARK_METRIC =", null_metric_col)
+    print("NULL_BENCHMARK_N_ROUNDS =", NULL_BENCHMARK_N_ROUNDS)
     print("NULL_BENCHMARK_N_NOISE_FEATURES =", NULL_BENCHMARK_N_NOISE_FEATURES)
 
     null_noise_frame = _make_null_noise_frame(
@@ -5422,27 +5440,26 @@ if NULL_BENCHMARK_ENABLED:
         prefix=NULL_BENCHMARK_NOISE_PREFIX,
     )
     null_feature_cols = list(null_noise_frame.columns)
+    null_candidate_cols = list(dict.fromkeys([*candidate_cols, *null_feature_cols]))
 
-    null_all_df = all_df.copy()
-    for col in null_feature_cols:
-        null_all_df[col] = null_noise_frame[col].to_numpy()
+    null_all_df = pd.concat([all_df.copy(), null_noise_frame], axis=1)
     noise_by_id = null_all_df.set_index(ID_COL)[null_feature_cols]
     null_train_df = _attach_null_noise(train_df, noise_by_id)
     null_valid_df = _attach_null_noise(valid_df, noise_by_id)
     null_test_df = _attach_null_noise(test_df, noise_by_id)
 
-    null_booster = ResidualFeatureBooster(
+    null_competition_booster = ResidualFeatureBooster(
         ResidualFeatureBoosterConfig(
             residual_model_params=RESIDUAL_MODEL_PARAMS,
-            n_rounds=1,
-            select_per_round=1,
+            n_rounds=NULL_BENCHMARK_N_ROUNDS,
+            select_per_round=SELECT_PER_ROUND,
             main_metric="bad_rmse_reduction",
             min_improvement=MIN_IMPROVEMENT,
-            selection_mode="top_k",
+            selection_mode=BOOSTING_SELECTION_MODE,
             selection_metric=NULL_BENCHMARK_METRIC,
-            selection_threshold=None,
+            selection_threshold=BOOSTING_SELECTION_THRESHOLD,
             selection_direction=BOOSTING_SELECTION_DIRECTION,
-            max_select_per_round=1,
+            max_select_per_round=BOOSTING_MAX_SELECT_PER_ROUND,
             use_test_for_selection=NULL_BENCHMARK_USE_TEST_FOR_SELECTION,
             min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
             overfit_guard_enabled=OVERFIT_GUARD_ENABLED,
@@ -5457,30 +5474,20 @@ if NULL_BENCHMARK_ENABLED:
         )
     )
 
-    null_summary_rows = []
-    null_top_frames = []
-    null_combined_frames = []
+    null_competition_summary_rows = []
+    null_competition_top_frames = []
+    null_competition_ranking_frames = []
+    null_competition_selected_frames = []
+    null_competition_curve_frames = []
 
     for defect in DEFECTS:
         defect_id = str(defect["defect_id"])
         groups = defect_groups[defect_id]
-        real_ranking_path = OUT_DIR / "rankings" / f"{defect_id}_round_{NULL_BENCHMARK_REAL_ROUND}.csv"
-        if not real_ranking_path.exists():
-            print(f"[NULL {defect_id}] skipped: real ranking file not found: {real_ranking_path}")
-            continue
-
-        real_ranking = pd.read_csv(real_ranking_path)
-        if null_metric_col not in real_ranking.columns:
-            print(f"[NULL {defect_id}] skipped: metric column not found in real ranking: {null_metric_col}")
-            continue
-        real_ranking = real_ranking.copy()
-        real_ranking["feature_type"] = "real"
-        real_ranking["null_feature"] = False
-        real_ranking["selected_in_main_round"] = real_ranking.get("selected", False)
+        print(f"[NULL COMPETITION {defect_id}] scoring {len(null_candidate_cols)} real+null candidates")
 
         null_quality = profile_candidate_features(
             null_all_df,
-            null_feature_cols,
+            null_candidate_cols,
             id_col=ID_COL,
             split_col=SPLIT_COL,
             bad_ids=groups["bad"],
@@ -5489,12 +5496,11 @@ if NULL_BENCHMARK_ENABLED:
             protected_cols={ID_COL, TARGET_COL, SPLIT_COL, *base_feature_cols},
         )
 
-        print(f"[NULL {defect_id}] scoring {len(null_feature_cols)} null features")
-        null_result = null_booster.run_for_defect(
+        result = null_competition_booster.run_for_defect(
             train_df=null_train_df,
             valid_df=null_valid_df,
             test_df=null_test_df,
-            candidate_cols=null_feature_cols,
+            candidate_cols=null_candidate_cols,
             target_col=TARGET_COL,
             id_col=ID_COL,
             baseline_pred_col="baseline_pred",
@@ -5502,154 +5508,178 @@ if NULL_BENCHMARK_ENABLED:
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
             quality_summary=null_quality,
-            output_dir=NULL_BENCHMARK_DIR / "null_rankings",
+            output_dir=NULL_BENCHMARK_DIR / "competition_rankings",
         )
-        if not null_result.rankings:
-            print(f"[NULL {defect_id}] no null ranking produced")
-            continue
 
-        null_ranking = null_result.rankings[0].copy()
-        null_ranking["feature_type"] = "null"
-        null_ranking["null_feature"] = True
-        null_ranking["selected_in_main_round"] = False
-        null_ranking["selected_in_null_only"] = null_ranking.get("selected", False)
-        null_ranking["selected"] = False
+        if not result.selected_features.empty:
+            selected = result.selected_features.copy()
+            selected["feature_type"] = _feature_type_from_name(selected["feature_name"])
+            selected["is_null_feature"] = selected["feature_type"].eq("null")
+            null_competition_selected_frames.append(selected)
 
-        common_cols = sorted(set(real_ranking.columns) | set(null_ranking.columns))
-        combined = pd.concat(
-            [real_ranking.reindex(columns=common_cols), null_ranking.reindex(columns=common_cols)],
-            ignore_index=True,
-        )
-        combined[null_metric_col] = pd.to_numeric(combined[null_metric_col], errors="coerce")
-        combined = combined.sort_values(
-            [null_metric_col, "feature_name"],
-            ascending=[not null_higher_is_better, True],
-            na_position="last",
-        ).reset_index(drop=True)
-        combined.insert(0, "null_benchmark_rank", np.arange(1, len(combined) + 1))
-        combined["defect_id"] = defect_id
-        fail_ok = combined.get("fail_reason", "").fillna("").astype(str).eq("") if "fail_reason" in combined.columns else pd.Series(True, index=combined.index)
-        guard_ok = combined.get("overfit_guard_pass", True).fillna(True).astype(bool) if "overfit_guard_pass" in combined.columns else pd.Series(True, index=combined.index)
-        selection_ok = combined.get("eligible_for_selection", True).fillna(True).astype(bool) if "eligible_for_selection" in combined.columns else pd.Series(True, index=combined.index)
-        metric_ok = combined[null_metric_col].notna()
-        combined["eligible_for_null_benchmark"] = fail_ok & guard_ok & selection_ok & metric_ok
+        if not result.residual_curve.empty:
+            curve = result.residual_curve.copy()
+            if "selected_feature" in curve.columns:
+                curve["feature_type"] = _feature_type_from_name(curve["selected_feature"])
+                curve["is_null_feature"] = curve["feature_type"].eq("null")
+            null_competition_curve_frames.append(curve)
 
-        real_with_metric = combined[(combined["feature_type"] == "real") & metric_ok].copy()
-        null_with_metric = combined[(combined["feature_type"] == "null") & metric_ok].copy()
-        real_scored = combined[(combined["feature_type"] == "real") & combined["eligible_for_null_benchmark"]].copy()
-        null_scored = combined[(combined["feature_type"] == "null") & combined["eligible_for_null_benchmark"]].copy()
-        top_n = combined.head(int(NULL_BENCHMARK_TOP_N_DISPLAY)).copy()
-        top_n["metric_col"] = null_metric_col
-        null_top_frames.append(top_n)
-        null_combined_frames.append(combined)
+        for ranking_df in result.rankings:
+            if ranking_df.empty or "round" not in ranking_df.columns:
+                continue
+            ranking = ranking_df.copy()
+            round_no = int(pd.to_numeric(ranking["round"], errors="coerce").max())
+            ranking["feature_type"] = _feature_type_from_name(ranking["feature_name"])
+            ranking["is_null_feature"] = ranking["feature_type"].eq("null")
+            ranking["metric_col"] = null_metric_col
+            ranking[null_metric_col] = pd.to_numeric(ranking[null_metric_col], errors="coerce") if null_metric_col in ranking.columns else np.nan
 
-        if real_scored.empty or null_scored.empty:
-            null_summary_rows.append(
-                {
-                    "defect_id": defect_id,
-                    "metric_col": null_metric_col,
-                    "n_real_with_metric": len(real_with_metric),
-                    "n_null_with_metric": len(null_with_metric),
-                    "n_real_eligible": len(real_scored),
-                    "n_null_eligible": len(null_scored),
-                    "judgement": "insufficient_eligible_rows",
-                }
-            )
-            continue
+            fail_ok = ranking.get("fail_reason", "").fillna("").astype(str).eq("") if "fail_reason" in ranking.columns else pd.Series(True, index=ranking.index)
+            guard_ok = ranking.get("overfit_guard_pass", True).fillna(True).astype(bool) if "overfit_guard_pass" in ranking.columns else pd.Series(True, index=ranking.index)
+            selection_ok = ranking.get("eligible_for_selection", True).fillna(True).astype(bool) if "eligible_for_selection" in ranking.columns else pd.Series(True, index=ranking.index)
+            metric_ok = ranking[null_metric_col].notna()
+            ranking["eligible_for_null_benchmark"] = fail_ok & guard_ok & selection_ok & metric_ok
 
-        best_real = real_scored.iloc[0]
-        best_null = null_scored.iloc[0]
-        best_real_score = float(best_real[null_metric_col])
-        best_null_score = float(best_null[null_metric_col])
-        best_real_adjusted = _score_sign_adjusted(best_real_score, higher_is_better=null_higher_is_better)
-        best_null_adjusted = _score_sign_adjusted(best_null_score, higher_is_better=null_higher_is_better)
-        real_beats_best_null = bool(best_real_adjusted > best_null_adjusted)
-        n_null_in_top_n = int((top_n["feature_type"] == "null").sum())
-        selected_real = real_scored[real_scored.get("selected_in_main_round", False).fillna(False).astype(bool)].copy()
-        if selected_real.empty:
-            selected_real = real_scored.head(1).copy()
-        selected_adjusted = selected_real[null_metric_col].map(lambda value: _score_sign_adjusted(value, higher_is_better=null_higher_is_better))
-        n_selected_beating_best_null = int((selected_adjusted > best_null_adjusted).sum())
-        n_real_beating_best_null = int(real_scored[null_metric_col].map(lambda value: _score_sign_adjusted(value, higher_is_better=null_higher_is_better)).gt(best_null_adjusted).sum())
-        null_better_or_equal_best_real = int(null_scored[null_metric_col].map(lambda value: _score_sign_adjusted(value, higher_is_better=null_higher_is_better)).ge(best_real_adjusted).sum())
-        empirical_p_vs_null = (1 + null_better_or_equal_best_real) / (1 + len(null_scored))
+            top_n = ranking.head(int(NULL_BENCHMARK_TOP_N_DISPLAY)).copy()
+            null_competition_top_frames.append(top_n)
+            null_competition_ranking_frames.append(ranking)
 
-        if real_beats_best_null and n_null_in_top_n == 0:
-            judgement = "strong_real_signal_vs_null"
-        elif real_beats_best_null:
-            judgement = "real_best_beats_null_but_null_appears_in_top_n"
-        else:
-            judgement = "weak_or_ambiguous_vs_null"
+            eligible = ranking[ranking["eligible_for_null_benchmark"]].copy()
+            real_eligible = eligible[eligible["feature_type"].eq("real")].copy()
+            null_eligible = eligible[eligible["feature_type"].eq("null")].copy()
+            selected_rows = ranking[ranking.get("selected", False).fillna(False).astype(bool)].copy() if "selected" in ranking.columns else ranking.iloc[0:0].copy()
+            selected_real = selected_rows[selected_rows["feature_type"].eq("real")].copy()
+            selected_null = selected_rows[selected_rows["feature_type"].eq("null")].copy()
 
-        null_summary_rows.append(
-            {
+            summary_row = {
                 "defect_id": defect_id,
+                "round": round_no,
                 "metric_col": null_metric_col,
                 "higher_is_better": null_higher_is_better,
-                "n_real_with_metric": len(real_with_metric),
-                "n_null_with_metric": len(null_with_metric),
-                "n_real_eligible": len(real_scored),
-                "n_null_eligible": len(null_scored),
+                "n_real_candidates": int(ranking["feature_type"].eq("real").sum()),
+                "n_null_candidates": int(ranking["feature_type"].eq("null").sum()),
+                "n_real_eligible": len(real_eligible),
+                "n_null_eligible": len(null_eligible),
                 "top_n_checked": int(NULL_BENCHMARK_TOP_N_DISPLAY),
-                "n_null_in_top_n": n_null_in_top_n,
-                "best_real_rank": int(best_real["null_benchmark_rank"]),
-                "best_real_feature": best_real["feature_name"],
-                "best_real_score": best_real_score,
-                "best_null_rank": int(best_null["null_benchmark_rank"]),
-                "best_null_feature": best_null["feature_name"],
-                "best_null_score": best_null_score,
-                "best_real_margin_vs_best_null": best_real_adjusted - best_null_adjusted,
-                "real_beats_best_null": real_beats_best_null,
-                "n_real_beating_best_null": n_real_beating_best_null,
-                "n_selected_real_beating_best_null": n_selected_beating_best_null,
-                "empirical_p_vs_null": empirical_p_vs_null,
-                "judgement": judgement,
+                "n_null_in_top_n": int(top_n["feature_type"].eq("null").sum()),
+                "n_selected": len(selected_rows),
+                "n_selected_real": len(selected_real),
+                "n_selected_null": len(selected_null),
+                "selected_real_features": ", ".join(selected_real["feature_name"].dropna().astype(str).tolist()),
+                "selected_null_features": ", ".join(selected_null["feature_name"].dropna().astype(str).tolist()),
+            }
+
+            if real_eligible.empty or null_eligible.empty:
+                summary_row["judgement"] = "insufficient_real_or_null_eligible_rows"
+                null_competition_summary_rows.append(summary_row)
+                continue
+
+            best_real = real_eligible.iloc[0]
+            best_null = null_eligible.iloc[0]
+            best_real_score = float(best_real[null_metric_col])
+            best_null_score = float(best_null[null_metric_col])
+            best_real_adjusted = float(_null_adjusted_score(pd.Series([best_real_score]), higher_is_better=null_higher_is_better).iloc[0])
+            best_null_adjusted = float(_null_adjusted_score(pd.Series([best_null_score]), higher_is_better=null_higher_is_better).iloc[0])
+            null_adjusted = _null_adjusted_score(null_eligible[null_metric_col], higher_is_better=null_higher_is_better)
+            real_beats_best_null = bool(best_real_adjusted > best_null_adjusted)
+            empirical_p_vs_null = (1 + int(null_adjusted.ge(best_real_adjusted).sum())) / (1 + len(null_adjusted))
+
+            selected_real_adjusted = _null_adjusted_score(selected_real[null_metric_col], higher_is_better=null_higher_is_better) if not selected_real.empty else pd.Series(dtype=float)
+            n_selected_real_beating_best_null = int(selected_real_adjusted.gt(best_null_adjusted).sum()) if not selected_real_adjusted.empty else 0
+
+            summary_row.update(
+                {
+                    "best_real_rank": int(best_real["rank"]),
+                    "best_real_feature": best_real["feature_name"],
+                    "best_real_score": best_real_score,
+                    "best_null_rank": int(best_null["rank"]),
+                    "best_null_feature": best_null["feature_name"],
+                    "best_null_score": best_null_score,
+                    "best_real_margin_vs_best_null": best_real_adjusted - best_null_adjusted,
+                    "real_beats_best_null": real_beats_best_null,
+                    "n_selected_real_beating_best_null": n_selected_real_beating_best_null,
+                    "empirical_p_vs_null": empirical_p_vs_null,
+                }
+            )
+
+            if len(selected_null) > 0:
+                judgement = "null_selected_by_boosting"
+            elif real_beats_best_null and int(top_n["feature_type"].eq("null").sum()) == 0:
+                judgement = "strong_real_signal_vs_null"
+            elif real_beats_best_null:
+                judgement = "real_best_beats_null_but_null_appears_in_top_n"
+            else:
+                judgement = "weak_or_ambiguous_vs_null"
+            summary_row["judgement"] = judgement
+            null_competition_summary_rows.append(summary_row)
+
+    null_competition_summary = pd.DataFrame(null_competition_summary_rows)
+    null_competition_top_ranking = pd.concat(null_competition_top_frames, ignore_index=True) if null_competition_top_frames else pd.DataFrame()
+    null_competition_rankings = pd.concat(null_competition_ranking_frames, ignore_index=True) if null_competition_ranking_frames else pd.DataFrame()
+    null_competition_selected_features = pd.concat(null_competition_selected_frames, ignore_index=True) if null_competition_selected_frames else pd.DataFrame()
+    null_competition_residual_curve = pd.concat(null_competition_curve_frames, ignore_index=True) if null_competition_curve_frames else pd.DataFrame()
+
+    write_csv(null_competition_summary, NULL_BENCHMARK_DIR / "null_competition_summary.csv")
+    write_csv(null_competition_top_ranking, NULL_BENCHMARK_DIR / "null_competition_top_ranking.csv")
+    write_csv(null_competition_rankings, NULL_BENCHMARK_DIR / "null_competition_rankings.csv")
+    write_csv(null_competition_selected_features, NULL_BENCHMARK_DIR / "null_competition_selected_features.csv")
+    write_csv(null_competition_residual_curve, NULL_BENCHMARK_DIR / "null_competition_residual_curve.csv")
+
+    comparison_rows = []
+    for defect in DEFECTS:
+        defect_id = str(defect["defect_id"])
+        main_features = _feature_list_for_defect(selected_features, defect_id=defect_id)
+        competition_real_features = _feature_list_for_defect(null_competition_selected_features, defect_id=defect_id, feature_type="real")
+        competition_null_features = _feature_list_for_defect(null_competition_selected_features, defect_id=defect_id, feature_type="null")
+        comparison_rows.append(
+            {
+                "defect_id": defect_id,
+                "main_selected_features": ", ".join(main_features),
+                "null_competition_selected_real_features": ", ".join(competition_real_features),
+                "null_competition_selected_null_features": ", ".join(competition_null_features),
+                "n_main_selected": len(main_features),
+                "n_competition_real_selected": len(competition_real_features),
+                "n_competition_null_selected": len(competition_null_features),
+                "n_overlap_main_vs_competition_real": len(set(main_features) & set(competition_real_features)),
             }
         )
+    null_competition_selected_comparison = pd.DataFrame(comparison_rows)
+    write_csv(null_competition_selected_comparison, NULL_BENCHMARK_DIR / "null_competition_selected_comparison.csv")
 
-    null_benchmark_summary = pd.DataFrame(null_summary_rows)
-    null_benchmark_top_ranking = pd.concat(null_top_frames, ignore_index=True) if null_top_frames else pd.DataFrame()
-    null_benchmark_combined_ranking = pd.concat(null_combined_frames, ignore_index=True) if null_combined_frames else pd.DataFrame()
-
-    write_csv(null_benchmark_summary, NULL_BENCHMARK_DIR / "null_benchmark_summary.csv")
-    write_csv(null_benchmark_top_ranking, NULL_BENCHMARK_DIR / "null_benchmark_top_ranking.csv")
-    write_csv(null_benchmark_combined_ranking, NULL_BENCHMARK_DIR / "null_benchmark_combined_ranking.csv")
-
-    display(null_benchmark_summary)
+    display(null_competition_summary)
+    display(null_competition_selected_comparison)
     display_cols = [
-        "defect_id", "null_benchmark_rank", "feature_type", "feature_name", "metric_col", null_metric_col,
-        "eligible_for_null_benchmark", "selected", "selected_in_main_round", "selected_in_null_only",
-        "overfit_guard_pass", "fail_reason", "overfit_guard_reason",
+        "defect_id", "round", "rank", "feature_type", "feature_name", "metric_col", null_metric_col,
+        "eligible_for_null_benchmark", "selected", "overfit_guard_pass", "fail_reason", "overfit_guard_reason",
     ]
-    display(null_benchmark_top_ranking[[col for col in display_cols if col in null_benchmark_top_ranking.columns]])
+    display(null_competition_top_ranking[[col for col in display_cols if col in null_competition_top_ranking.columns]])
 
     try:
         import matplotlib.pyplot as plt
 
-        if not null_benchmark_combined_ranking.empty:
-            defect_ids = null_benchmark_combined_ranking["defect_id"].dropna().astype(str).unique().tolist()
-            fig, axes = plt.subplots(len(defect_ids), 1, figsize=(9, max(3.2, 3.1 * len(defect_ids))), squeeze=False)
-            axes = axes[:, 0]
-            for ax, defect_id in zip(axes, defect_ids):
-                work = null_benchmark_combined_ranking[null_benchmark_combined_ranking["defect_id"].astype(str) == defect_id].copy()
-                real = work[work["feature_type"] == "real"]
-                null = work[work["feature_type"] == "null"]
-                ax.scatter(real["null_benchmark_rank"], real[null_metric_col], s=12, alpha=0.45, label="real feature")
-                ax.scatter(null["null_benchmark_rank"], null[null_metric_col], s=40, marker="X", color="#e76f51", label="null/noise feature")
-                if not null.empty:
-                    best_null = null.dropna(subset=[null_metric_col]).head(1)
-                    if not best_null.empty:
-                        ax.axhline(float(best_null[null_metric_col].iloc[0]), color="#e76f51", linestyle="--", linewidth=1.0, alpha=0.8, label="best null score")
-                ax.set_title(f"{defect_id} null benchmark ({null_metric_col})")
-                ax.set_xlabel("rank among real + null features")
-                ax.set_ylabel(null_metric_col)
-                ax.grid(alpha=0.25)
-                ax.legend(loc="best", fontsize=8)
+        if not null_competition_summary.empty:
+            fig, axes = plt.subplots(1, 2, figsize=(14, 4.5))
+            plot_frame = null_competition_summary.copy()
+            for defect_id, group in plot_frame.groupby("defect_id", sort=False):
+                group = group.sort_values("round")
+                axes[0].plot(group["round"], group["n_null_in_top_n"], marker="o", label=str(defect_id))
+                axes[1].plot(group["round"], group["best_real_margin_vs_best_null"], marker="o", label=str(defect_id))
+            axes[0].set_title(f"null features in top {NULL_BENCHMARK_TOP_N_DISPLAY}")
+            axes[0].set_xlabel("round")
+            axes[0].set_ylabel("count")
+            axes[0].grid(alpha=0.25)
+            axes[0].legend(fontsize=8)
+            axes[1].axhline(0.0, color="#6c757d", linestyle="--", linewidth=1.0)
+            axes[1].set_title("best real margin vs best null")
+            axes[1].set_xlabel("round")
+            axes[1].set_ylabel("adjusted metric margin")
+            axes[1].grid(alpha=0.25)
+            axes[1].legend(fontsize=8)
             fig.tight_layout()
-            fig.savefig(NULL_BENCHMARK_DIR / "null_benchmark_rank_plot.png", dpi=150)
+            fig.savefig(NULL_BENCHMARK_DIR / "null_competition_summary_plot.png", dpi=150)
             display(fig)
     except Exception as exc:
-        print("null benchmark plot skipped:", type(exc).__name__, exc)
+        print("null competition plot skipped:", type(exc).__name__, exc)
 
 --- CELL 16 [markdown] ---
 ## 7. Final model: Xb + selected Xnew 재학습
