@@ -136,8 +136,10 @@ def round_residual_summary(
     """Build round-level mean absolute residual points.
 
     Round 0 comes from the baseline residual summary. Later rounds come from
-    the selected-feature residual curve. The value is MAE, i.e.
-    mean(abs(y - prediction)), which is a stable "average residual" measure.
+    the final cumulative residual-curve row for each defect/round. If a round
+    selected multiple features, only the last row of that round is used, i.e.
+    the state after all features selected in that round have been boosted.
+    The value is MAE, mean(abs(y - prediction)).
     """
     rows: list[dict[str, object]] = []
     if baseline_summary is not None and not baseline_summary.empty:
@@ -151,23 +153,48 @@ def round_residual_summary(
                     "split": row["split"],
                     "group": group,
                     "selected_feature": "baseline",
+                    "round_selected_features": "",
+                    "n_selected_features_in_round": 0,
+                    "round_contains_answer_feature": False,
                     "mean_abs_residual": row.get("mean_abs_residual", np.nan),
                 }
             )
 
     if residual_curve is not None and not residual_curve.empty:
-        for _, row in residual_curve.iterrows():
+        work = residual_curve.copy()
+        if "defect_id" not in work.columns or "round" not in work.columns:
+            return pd.DataFrame(rows)
+        work["_curve_order"] = np.arange(len(work))
+        work["round"] = pd.to_numeric(work["round"], errors="coerce")
+        work = work.dropna(subset=["round"]).copy()
+        work["round"] = work["round"].astype(int)
+        grouped = work.sort_values(["defect_id", "round", "_curve_order"]).groupby(["defect_id", "round"], sort=False)
+        for (defect_id, round_no), round_df in grouped:
+            row = round_df.iloc[-1]
+            round_features = (
+                round_df["selected_feature"].dropna().astype(str).tolist()
+                if "selected_feature" in round_df.columns
+                else []
+            )
+            answer_flags = (
+                round_df["is_answer_feature"].fillna(False).astype(bool)
+                if "is_answer_feature" in round_df.columns
+                else pd.Series(False, index=round_df.index)
+            )
             for split in ("train", "valid", "test"):
                 col = f"{split}_{group}_mae"
                 if col not in residual_curve.columns:
                     continue
                 rows.append(
                     {
-                        "defect_id": row["defect_id"],
-                        "round": int(row["round"]),
+                        "defect_id": defect_id,
+                        "round": int(round_no),
                         "split": split,
                         "group": group,
-                        "selected_feature": row.get("selected_feature", ""),
+                        "selected_feature": round_features[-1] if round_features else "",
+                        "round_selected_features": ", ".join(round_features),
+                        "n_selected_features_in_round": len(round_features),
+                        "round_contains_answer_feature": bool(answer_flags.any()),
                         "mean_abs_residual": row.get(col, np.nan),
                     }
                 )
@@ -288,6 +315,8 @@ def plot_round_residual_points(
     output_path: str | Path | None = None,
     title: str = "round mean absolute residual",
     answer_features_by_defect: dict[str, Any] | None = None,
+    show_answer_markers: bool = False,
+    annotate_features: bool = False,
 ):
     """Plot round 0/1/2/... average residual points by defect."""
     if summary.empty:
@@ -300,6 +329,7 @@ def plot_round_residual_points(
     splits = [split for split in ("train", "valid", "test") if (summary["split"].astype(str) == split).any()]
     if not splits:
         splits = sorted(summary["split"].dropna().astype(str).unique())
+    round_ticks = sorted(pd.to_numeric(summary["round"], errors="coerce").dropna().astype(int).unique().tolist())
     fig, axes = plt.subplots(1, len(splits), figsize=(8 * len(splits), 4.5), squeeze=False)
     axes = axes[0]
     for ax, split in zip(axes, splits):
@@ -308,8 +338,13 @@ def plot_round_residual_points(
             group_df = group_df.sort_values("round")
             ax.plot(group_df["round"], group_df["mean_abs_residual"], marker="o", linewidth=1.7, label=str(defect_id))
             answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
-            if answer_rules and "selected_feature" in group_df.columns:
-                answers = group_df[answer_feature_mask(group_df["selected_feature"], answer_rules)]
+            if show_answer_markers and answer_rules:
+                if "round_contains_answer_feature" in group_df.columns:
+                    answers = group_df[group_df["round_contains_answer_feature"].fillna(False).astype(bool)]
+                elif "selected_feature" in group_df.columns:
+                    answers = group_df[answer_feature_mask(group_df["selected_feature"], answer_rules)]
+                else:
+                    answers = group_df.iloc[0:0]
                 if not answers.empty:
                     ax.scatter(
                         answers["round"],
@@ -320,20 +355,23 @@ def plot_round_residual_points(
                         label=f"{defect_id} answer",
                         zorder=6,
                     )
-            for _, row in group_df.iterrows():
-                if int(row["round"]) == 0:
-                    continue
-                ax.annotate(
-                    str(row.get("selected_feature", ""))[:24],
-                    (row["round"], row["mean_abs_residual"]),
-                    textcoords="offset points",
-                    xytext=(4, 5),
-                    fontsize=8,
-                    alpha=0.8,
-                )
+            if annotate_features:
+                for _, row in group_df.iterrows():
+                    if int(row["round"]) == 0:
+                        continue
+                    ax.annotate(
+                        str(row.get("round_selected_features", row.get("selected_feature", "")))[:24],
+                        (row["round"], row["mean_abs_residual"]),
+                        textcoords="offset points",
+                        xytext=(4, 5),
+                        fontsize=8,
+                        alpha=0.8,
+                    )
         ax.set_title(f"{split} {title}")
         ax.set_xlabel("round")
         ax.set_ylabel("mean abs residual (MAE)")
+        if round_ticks:
+            ax.set_xticks(round_ticks)
         ax.grid(alpha=0.25)
         ax.legend(loc="best", fontsize=8)
     fig.tight_layout()

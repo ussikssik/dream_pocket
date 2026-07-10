@@ -4,10 +4,56 @@ import unittest
 
 import pandas as pd
 
-from feature_boosting.reporting import final_metric_summary
+from feature_boosting.reporting import final_metric_summary, round_residual_summary
 
 
 class ReportingTests(unittest.TestCase):
+    def test_round_residual_summary_keeps_one_final_point_per_round(self) -> None:
+        baseline = pd.DataFrame(
+            [
+                {
+                    "defect_id": "defect_1",
+                    "group": "bad",
+                    "split": "valid",
+                    "mean_abs_residual": 10.0,
+                }
+            ]
+        )
+        curve = pd.DataFrame(
+            [
+                {
+                    "defect_id": "defect_1",
+                    "round": 1,
+                    "selected_feature": "feature_a",
+                    "valid_bad_mae": 8.0,
+                    "is_answer_feature": False,
+                },
+                {
+                    "defect_id": "defect_1",
+                    "round": 1,
+                    "selected_feature": "feature_b",
+                    "valid_bad_mae": 6.0,
+                    "is_answer_feature": True,
+                },
+                {
+                    "defect_id": "defect_1",
+                    "round": 2,
+                    "selected_feature": "feature_c",
+                    "valid_bad_mae": 5.0,
+                    "is_answer_feature": False,
+                },
+            ]
+        )
+
+        summary = round_residual_summary(curve, baseline, group="bad")
+        valid = summary[summary["split"].astype(str) == "valid"].reset_index(drop=True)
+
+        self.assertEqual(valid["round"].tolist(), [0, 1, 2])
+        self.assertEqual(valid["mean_abs_residual"].tolist(), [10.0, 6.0, 5.0])
+        self.assertEqual(valid.loc[1, "round_selected_features"], "feature_a, feature_b")
+        self.assertEqual(int(valid.loc[1, "n_selected_features_in_round"]), 2)
+        self.assertTrue(bool(valid.loc[1, "round_contains_answer_feature"]))
+
     def test_final_metric_summary_calculates_reductions(self) -> None:
         metrics = pd.DataFrame(
             [
