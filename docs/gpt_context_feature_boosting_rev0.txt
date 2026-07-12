@@ -1985,6 +1985,7 @@ def recommend_overfit_safe_settings(
     n_train_rows: int,
     n_candidate_features: int,
     n_base_features: int = 0,
+    metric_name: str = "rmse",
 ) -> dict[str, Any]:
     """Return conservative residual-model and guard settings for early trials.
 
@@ -2021,9 +2022,15 @@ def recommend_overfit_safe_settings(
     params.setdefault("thread_count", 1)
     params.setdefault("verbose", False)
 
+    guard_metric = str(metric_name).strip().lower()
+    if guard_metric not in {"rmse", "mae"}:
+        raise ValueError(f"unsupported metric_name: {metric_name!r}")
+
     guard = {
         "overfit_guard_enabled": True,
         "overfit_guard_metric_scope": "bad",
+        "overfit_guard_metric_name": guard_metric,
+        "overfit_guard_min_valid_reduction": 0.0,
         "overfit_guard_min_valid_rmse_reduction": 0.0,
         "overfit_guard_max_valid_after_over_baseline": 1.0,
         "overfit_guard_max_valid_train_gap": float(limits["valid_train_gap"]),
@@ -2046,6 +2053,7 @@ def recommend_overfit_safe_settings(
             {"setting": "base_features", "value": int(n_base_features)},
             {"setting": "candidate_features_per_train_row", "value": round(pressure, 4)},
             {"setting": "residual_param_changes", "value": "; ".join(changes) if changes else "none"},
+            {"setting": "overfit_guard_metric_name", "value": guard["overfit_guard_metric_name"]},
             {"setting": "overfit_guard_max_valid_after_over_baseline", "value": guard["overfit_guard_max_valid_after_over_baseline"]},
             {"setting": "overfit_guard_max_valid_train_gap", "value": guard["overfit_guard_max_valid_train_gap"]},
             {"setting": "overfit_guard_use_test", "value": guard["overfit_guard_use_test"]},
@@ -2182,9 +2190,17 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, Any] | None = None) -> None:
+def plot_residual_curve(
+    curve: pd.DataFrame,
+    output_dir: Path,
+    answer_features_by_defect: dict[str, Any] | None = None,
+    metric_name: str = "rmse",
+) -> None:
     if curve.empty:
         return
+    metric = str(metric_name).strip().lower()
+    if metric not in {"rmse", "mae"}:
+        raise ValueError(f"unsupported residual curve metric: {metric_name!r}")
     try:
         import matplotlib.pyplot as plt
     except Exception:
@@ -2192,25 +2208,26 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_b
     for defect_id, group in curve.groupby("defect_id", sort=False):
         fig, ax = plt.subplots(figsize=(8, 4))
         for split, color in (("train", "#59a14f"), ("valid", "#4e79a7"), ("test", "#e15759")):
-            col = f"{split}_bad_rmse"
+            col = f"{split}_bad_{metric}"
             if col in group.columns:
-                ax.plot(group["round"], group[col], marker="o", color=color, label=f"{split} bad RMSE")
+                ax.plot(group["round"], group[col], marker="o", color=color, label=f"{split} bad {metric.upper()}")
         answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
         if answer_rules and "selected_feature" in group.columns:
             answers = group[answer_feature_mask(group["selected_feature"], answer_rules)]
             if not answers.empty:
-                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
+                valid_col = f"valid_bad_{metric}"
+                ax.scatter(answers["round"], answers[valid_col], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
                 for _, row in answers.iterrows():
                     ax.annotate(
                         str(row.get("selected_feature", ""))[:24],
-                        (row["round"], row["valid_bad_rmse"]),
+                        (row["round"], row[valid_col]),
                         textcoords="offset points",
                         xytext=(5, 6),
                         fontsize=8,
                         color="#2a9d8f",
                     )
         ax.set_xlabel("round")
-        ax.set_ylabel("RMSE")
+        ax.set_ylabel(metric.upper())
         ax.set_title(f"{defect_id} residual curve")
         ax.grid(alpha=0.25)
         ax.legend()
@@ -2817,6 +2834,8 @@ class ResidualFeatureBoosterConfig:
     min_valid_bad_samples: int = 1
     overfit_guard_enabled: bool = True
     overfit_guard_metric_scope: str = "bad"
+    overfit_guard_metric_name: str = "rmse"
+    overfit_guard_min_valid_reduction: float | None = None
     overfit_guard_min_valid_rmse_reduction: float | None = 0.0
     overfit_guard_max_valid_after_over_baseline: float | None = 1.0
     overfit_guard_max_valid_train_gap: float | None = 0.25
@@ -3103,7 +3122,10 @@ class ResidualFeatureBooster:
             "overfit_guard_pass": False,
             "overfit_guard_reason": "",
             "overfit_guard_scope": self.config.overfit_guard_metric_scope,
+            "overfit_guard_metric": self.config.overfit_guard_metric_name,
+            "overfit_gap_valid_train_metric_ratio": np.nan,
             "overfit_gap_valid_train_rmse_ratio": np.nan,
+            "overfit_gap_valid_train_mae_ratio": np.nan,
         }
         base_row.update(_empty_baseline_ratio_columns())
         if quality:
@@ -3186,28 +3208,37 @@ class ResidualFeatureBooster:
 
     def _apply_overfit_guard(self, row: dict[str, Any]) -> None:
         scope = _normalize_guard_scope(self.config.overfit_guard_metric_scope)
+        metric_name = _normalize_guard_metric(self.config.overfit_guard_metric_name)
+        metric_gap_col = f"overfit_gap_valid_train_{metric_name}_ratio"
         row["overfit_guard_scope"] = scope
+        row["overfit_guard_metric"] = metric_name
         if row.get("fail_reason"):
             row["overfit_guard_pass"] = False
             row["overfit_guard_reason"] = f"not_evaluated:{row.get('fail_reason')}"
+            row["overfit_gap_valid_train_metric_ratio"] = np.nan
+            row[metric_gap_col] = np.nan
             row["overfit_gap_valid_train_rmse_ratio"] = np.nan
             return
         if not self.config.overfit_guard_enabled:
             row["overfit_guard_pass"] = True
             row["overfit_guard_reason"] = ""
-            row["overfit_gap_valid_train_rmse_ratio"] = _safe_float(row.get(f"valid_{scope}_rmse_after_over_baseline")) - _safe_float(
-                row.get(f"train_{scope}_rmse_after_over_baseline")
+            gap = _safe_float(row.get(f"valid_{scope}_{metric_name}_after_over_baseline")) - _safe_float(
+                row.get(f"train_{scope}_{metric_name}_after_over_baseline")
             )
+            row["overfit_gap_valid_train_metric_ratio"] = gap
+            row[metric_gap_col] = gap
             return
 
         reasons: list[str] = []
-        valid_reduction_col = f"valid_{scope}_rmse_reduction"
-        valid_ratio_col = f"valid_{scope}_rmse_after_over_baseline"
-        train_ratio_col = f"train_{scope}_rmse_after_over_baseline"
-        test_ratio_col = f"test_{scope}_rmse_after_over_baseline"
+        valid_reduction_col = f"valid_{scope}_{metric_name}_reduction"
+        valid_ratio_col = f"valid_{scope}_{metric_name}_after_over_baseline"
+        train_ratio_col = f"train_{scope}_{metric_name}_after_over_baseline"
+        test_ratio_col = f"test_{scope}_{metric_name}_after_over_baseline"
 
         valid_reduction = _safe_float(row.get(valid_reduction_col))
-        min_reduction = self.config.overfit_guard_min_valid_rmse_reduction
+        min_reduction = self.config.overfit_guard_min_valid_reduction
+        if min_reduction is None:
+            min_reduction = self.config.overfit_guard_min_valid_rmse_reduction
         if min_reduction is not None and (not np.isfinite(valid_reduction) or valid_reduction <= float(min_reduction)):
             reasons.append(f"{valid_reduction_col}<={float(min_reduction):g}")
 
@@ -3218,10 +3249,11 @@ class ResidualFeatureBooster:
 
         train_ratio = _safe_float(row.get(train_ratio_col))
         gap = valid_ratio - train_ratio if np.isfinite(valid_ratio) and np.isfinite(train_ratio) else float("nan")
-        row["overfit_gap_valid_train_rmse_ratio"] = gap
+        row["overfit_gap_valid_train_metric_ratio"] = gap
+        row[metric_gap_col] = gap
         max_gap = self.config.overfit_guard_max_valid_train_gap
         if max_gap is not None and np.isfinite(gap) and gap > float(max_gap):
-            reasons.append(f"valid_train_{scope}_rmse_ratio_gap>{float(max_gap):g}")
+            reasons.append(f"valid_train_{scope}_{metric_name}_ratio_gap>{float(max_gap):g}")
 
         if self.config.overfit_guard_use_test:
             test_ratio = _safe_float(row.get(test_ratio_col))
@@ -3304,8 +3336,11 @@ class ResidualFeatureBooster:
             "test_good_rmse": rmse(y_test[test_good], current_pred_test[test_good]),
             "test_good_mae": mae(y_test[test_good], current_pred_test[test_good]),
             "train_global_rmse": rmse(y_train, current_pred_train),
+            "train_global_mae": mae(y_train, current_pred_train),
             "valid_global_rmse": rmse(y_valid, current_pred_valid),
+            "valid_global_mae": mae(y_valid, current_pred_valid),
             "test_global_rmse": rmse(y_test, current_pred_test),
+            "test_global_mae": mae(y_test, current_pred_test),
         }
 
 
@@ -3365,6 +3400,13 @@ def _normalize_guard_scope(scope: str) -> str:
     if normalized in {"bad", "good", "global"}:
         return normalized
     raise ValueError(f"unsupported overfit_guard_metric_scope: {scope!r}")
+
+
+def _normalize_guard_metric(metric_name: str) -> str:
+    normalized = str(metric_name).strip().lower()
+    if normalized in {"rmse", "mae"}:
+        return normalized
+    raise ValueError(f"unsupported overfit_guard_metric_name: {metric_name!r}")
 
 
 def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
@@ -3462,10 +3504,39 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "test_global_rmse_after",
         "test_global_rmse_reduction",
         "test_global_rmse_after_over_baseline",
+        "train_bad_mae_baseline",
+        "train_bad_mae_before",
+        "train_bad_mae_after",
+        "train_bad_mae_reduction",
+        "train_bad_mae_after_over_baseline",
+        "valid_bad_mae_baseline",
+        "valid_bad_mae_before",
+        "valid_bad_mae_after",
+        "valid_bad_mae_reduction",
+        "valid_bad_mae_after_over_baseline",
+        "valid_bad_mae_reduction_from_baseline_pct",
+        "test_bad_mae_before",
+        "test_bad_mae_after",
+        "test_bad_mae_reduction",
+        "test_bad_mae_after_over_baseline",
+        "valid_good_mae_reduction",
+        "test_good_mae_reduction",
+        "valid_global_mae_after",
+        "valid_global_mae_reduction",
+        "valid_global_mae_after_over_baseline",
+        "train_global_mae_after",
+        "train_global_mae_reduction",
+        "train_global_mae_after_over_baseline",
+        "test_global_mae_after",
+        "test_global_mae_reduction",
+        "test_global_mae_after_over_baseline",
         "overfit_guard_pass",
         "overfit_guard_reason",
         "overfit_guard_scope",
+        "overfit_guard_metric",
+        "overfit_gap_valid_train_metric_ratio",
         "overfit_gap_valid_train_rmse_ratio",
+        "overfit_gap_valid_train_mae_ratio",
     ]
     return {key: row.get(key, np.nan) for key in keys}
 
@@ -4395,6 +4466,7 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertFalse(result.selected_features.empty)
         self.assertEqual(result.selected_features["feature_name"].iloc[0], "hidden")
         self.assertGreater(float(result.selected_features["valid_bad_rmse_reduction"].iloc[0]), 0)
+        self.assertIn("valid_bad_mae_reduction", result.selected_features.columns)
         ranking = result.rankings[0].set_index("feature_name")
         self.assertIn("valid_bad_rmse_after_over_baseline", ranking.columns)
         self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
@@ -4542,6 +4614,45 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertIn("train_bad_rmse_after_over_baseline", ranking.columns)
         self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
         self.assertIn("valid_bad_rmse_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
+
+    def test_overfit_guard_supports_mae(self) -> None:
+        df = _overfit_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        bad_ids = set(df["sample_id"])
+
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy", "l2": 1e-6},
+                n_rounds=1,
+                selection_metric="bad_mae_reduction",
+                overfit_guard_enabled=True,
+                overfit_guard_metric_name="mae",
+                overfit_guard_min_valid_reduction=0.0,
+                overfit_guard_max_valid_after_over_baseline=1.0,
+                overfit_guard_max_valid_train_gap=0.25,
+                show_progress=False,
+            )
+        )
+        result = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["train_only_signal"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=bad_ids,
+            good_sample_ids=set(),
+        )
+
+        self.assertTrue(result.selected_features.empty)
+        ranking = result.rankings[0].set_index("feature_name")
+        self.assertEqual(ranking.loc["train_only_signal", "overfit_guard_metric"], "mae")
+        self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
+        self.assertIn("valid_bad_mae_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
 
     def test_zero_improvement_feature_is_not_selected(self) -> None:
         df = _synthetic_frame()
@@ -4726,7 +4837,7 @@ VS Code/Jupyter에서 위에서 아래로 실행하는 노트북입니다.
 2. `baseline_residual = y - baseline_pred` 계산
 3. defect별 bad/good group 기준으로 candidate feature 품질 필터링
 4. candidate feature 하나만 사용해 current residual 예측
-5. validation bad group의 `bad_rmse_reduction` 기준으로 feature 선택
+5. validation bad group의 설정 metric reduction 기준으로 feature 선택
 6. 선택 feature를 `Xb + selected Xnew`에 추가해 final CatBoost 재학습
 7. baseline vs final metric, ranking, SHAP summary 저장
 
@@ -4910,13 +5021,18 @@ RAW_DEFECT_GROUPS = [
     },
 ]
 
+EXPERIMENT_METRIC = "MAE"  # "MAE" or "RMSE"
+EXPERIMENT_METRIC_LOWER = EXPERIMENT_METRIC.strip().lower()
+if EXPERIMENT_METRIC_LOWER not in {"mae", "rmse"}:
+    raise ValueError("EXPERIMENT_METRIC must be 'MAE' or 'RMSE'")
+
 BASELINE_MODEL_PARAMS = {
     "backend": "auto",
     "iterations": 3000,
     "depth": 6,
     "learning_rate": 0.03,
-    "loss_function": "RMSE",
-    "eval_metric": "RMSE",
+    "loss_function": EXPERIMENT_METRIC,
+    "eval_metric": EXPERIMENT_METRIC,
     "random_seed": 42,
     "early_stopping_rounds": 100,
     "verbose": 200,
@@ -4927,8 +5043,8 @@ RESIDUAL_MODEL_PARAMS = {
     "iterations": 300,
     "depth": 3,
     "learning_rate": 0.05,
-    "loss_function": "RMSE",
-    "eval_metric": "RMSE",
+    "loss_function": EXPERIMENT_METRIC,
+    "eval_metric": EXPERIMENT_METRIC,
     "random_seed": 42,
     "early_stopping_rounds": 30,
     "verbose": False,
@@ -4946,10 +5062,10 @@ BOOSTING_N_ROUNDS = 5
 
 # Feature selection knobs.
 # Rank mode example: BOOSTING_SELECTION_MODE="top_k", SELECT_PER_ROUND=20
-# Ratio threshold example: BOOSTING_SELECTION_MODE="threshold", BOOSTING_SELECTION_METRIC="bad_rmse_after_over_baseline", BOOSTING_SELECTION_THRESHOLD=0.3
+# Ratio threshold example: BOOSTING_SELECTION_MODE="threshold", BOOSTING_SELECTION_METRIC=f"bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline", BOOSTING_SELECTION_THRESHOLD=0.3
 SELECT_PER_ROUND = 1
 BOOSTING_SELECTION_MODE = "top_k"  # "top_k" or "threshold"
-BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+BOOSTING_SELECTION_METRIC = f"bad_{EXPERIMENT_METRIC_LOWER}_reduction"
 BOOSTING_SELECTION_THRESHOLD = None
 BOOSTING_SELECTION_DIRECTION = "auto"
 BOOSTING_MAX_SELECT_PER_ROUND = None
@@ -4962,15 +5078,15 @@ BOOSTING_PROGRESS_EVERY = 100
 AUTO_OVERFIT_SAFE_SETTINGS = True
 OVERFIT_GUARD_ENABLED = True
 OVERFIT_GUARD_METRIC_SCOPE = "bad"  # "bad", "good", or "global"
-OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION = 0.0
+OVERFIT_GUARD_MIN_VALID_REDUCTION = 0.0
 OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = 1.0
 OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = 0.25
 OVERFIT_GUARD_USE_TEST = False  # exploratory only; True uses test as an additional guard
 OVERFIT_GUARD_MAX_TEST_AFTER_OVER_BASELINE = 1.05
 
 # Candidate rank chart y-axis: after residual / base-feature-only baseline residual.
-CANDIDATE_LOSS_GLOBAL_METRIC_COL = "valid_global_rmse_after_over_baseline"
-CANDIDATE_LOSS_BAD_METRIC_COL = "valid_bad_rmse_after_over_baseline"
+CANDIDATE_LOSS_GLOBAL_METRIC_COL = f"valid_global_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
+CANDIDATE_LOSS_BAD_METRIC_COL = f"valid_bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
 
 # Optional known answer features per defect.
 # You can mix exact names and flexible matching rules.
@@ -5170,12 +5286,13 @@ if AUTO_OVERFIT_SAFE_SETTINGS:
         n_train_rows=len(train_df),
         n_candidate_features=len(candidate_cols),
         n_base_features=len(base_feature_cols),
+        metric_name=EXPERIMENT_METRIC_LOWER,
     )
     RESIDUAL_MODEL_PARAMS = overfit_recommendation["residual_model_params"]
     guard = overfit_recommendation["guard"]
     OVERFIT_GUARD_ENABLED = guard["overfit_guard_enabled"]
     OVERFIT_GUARD_METRIC_SCOPE = guard["overfit_guard_metric_scope"]
-    OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION = guard["overfit_guard_min_valid_rmse_reduction"]
+    OVERFIT_GUARD_MIN_VALID_REDUCTION = guard["overfit_guard_min_valid_reduction"]
     OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = guard["overfit_guard_max_valid_after_over_baseline"]
     OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = guard["overfit_guard_max_valid_train_gap"]
     OVERFIT_GUARD_USE_TEST = guard["overfit_guard_use_test"]
@@ -5272,14 +5389,14 @@ display(baseline_summary.head(12))
 - 각 round마다 아직 선택되지 않은 candidate feature를 하나씩 residual model에 넣어 평가합니다.
 - 선택되는 feature 수는 설정에 따라 1개, 상위 K개, 또는 threshold 통과 feature 전체가 될 수 있습니다.
 - residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
-- 기본 feature 선택은 validation bad group의 `valid_bad_rmse_reduction` 기준이고, 설정에서 다른 metric으로 바꿀 수 있습니다.
+- 기본 feature 선택은 validation bad group의 `EXPERIMENT_METRIC` reduction 기준입니다.
 - 노트북 설정에서 `top_k` 또는 `threshold` 방식으로 round별 선택 feature 수를 조절할 수 있습니다.
 - candidate rank chart의 y축은 기본적으로 `after residual / baseline residual` 비율입니다.
 - `ANSWER_FEATURES`에 defect별 정답인자를 넣으면 chart에 별도 마커로 표시됩니다.
 - test metric은 선택에 쓰지 않고 기록/검증용으로만 저장합니다.
 - round별 ranking, 선택 feature, residual curve를 CSV로 저장합니다.
 - `BOOSTING_SHOW_PROGRESS = True`이면 candidate scoring 진행률이 출력됩니다.
-- 각 round의 candidate별 after-boosting RMSE를 rank chart로 보여주고 PNG로 저장합니다.
+- 각 round의 candidate별 after-boosting loss를 rank chart로 보여주고 PNG로 저장합니다.
 - 모든 boosting이 끝난 뒤 defect별 round 평균 절대 residual point chart를 보여줍니다.
 
 각 candidate feature는 `x_j -> current residual` 단일 feature 모델로만 평가됩니다. 선택 기준은 validation bad group의 residual 감소입니다.
@@ -5295,7 +5412,7 @@ booster = ResidualFeatureBooster(
         residual_model_params=RESIDUAL_MODEL_PARAMS,
         n_rounds=BOOSTING_N_ROUNDS,
         select_per_round=SELECT_PER_ROUND,
-        main_metric="bad_rmse_reduction",
+        main_metric=BOOSTING_SELECTION_METRIC,
         min_improvement=MIN_IMPROVEMENT,
         selection_mode=BOOSTING_SELECTION_MODE,
         selection_metric=BOOSTING_SELECTION_METRIC,
@@ -5306,7 +5423,8 @@ booster = ResidualFeatureBooster(
         min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
         overfit_guard_enabled=OVERFIT_GUARD_ENABLED,
         overfit_guard_metric_scope=OVERFIT_GUARD_METRIC_SCOPE,
-        overfit_guard_min_valid_rmse_reduction=OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION,
+        overfit_guard_metric_name=EXPERIMENT_METRIC_LOWER,
+        overfit_guard_min_valid_reduction=OVERFIT_GUARD_MIN_VALID_REDUCTION,
         overfit_guard_max_valid_after_over_baseline=OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE,
         overfit_guard_max_valid_train_gap=OVERFIT_GUARD_MAX_VALID_TRAIN_GAP,
         overfit_guard_use_test=OVERFIT_GUARD_USE_TEST,
@@ -5379,8 +5497,8 @@ for defect in DEFECTS:
                 answer_cols_to_show = [
                     col for col in [
                         "defect_id", "round", "rank", "feature_name", "selected", "eligible_for_selection",
-                        "ranking_only", "already_selected", "valid_bad_rmse_after_over_baseline",
-                        "valid_global_rmse_after_over_baseline", "fail_reason", "overfit_guard_reason",
+                        "ranking_only", "already_selected", CANDIDATE_LOSS_BAD_METRIC_COL,
+                        CANDIDATE_LOSS_GLOBAL_METRIC_COL, "fail_reason", "overfit_guard_reason",
                         "answer_match_rule",
                     ] if col in answer_rows.columns
                 ]
@@ -5415,7 +5533,12 @@ residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else
 write_csv(quality_summary, OUT_DIR / "candidate_quality_summary.csv")
 write_csv(selected_features, OUT_DIR / "selected_features.csv")
 write_csv(residual_curve, OUT_DIR / "residual_reduction_curve.csv")
-plot_residual_curve(residual_curve, OUT_DIR, answer_features_by_defect=ANSWER_FEATURES)
+plot_residual_curve(
+    residual_curve,
+    OUT_DIR,
+    answer_features_by_defect=ANSWER_FEATURES,
+    metric_name=EXPERIMENT_METRIC_LOWER,
+)
 
 round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
 write_csv(round_mean_residual, OUT_DIR / "round_mean_residual_summary.csv")
@@ -5559,7 +5682,7 @@ if NULL_BENCHMARK_ENABLED:
             residual_model_params=RESIDUAL_MODEL_PARAMS,
             n_rounds=NULL_BENCHMARK_N_ROUNDS,
             select_per_round=SELECT_PER_ROUND,
-            main_metric="bad_rmse_reduction",
+            main_metric=NULL_BENCHMARK_METRIC,
             min_improvement=MIN_IMPROVEMENT,
             selection_mode=BOOSTING_SELECTION_MODE,
             selection_metric=NULL_BENCHMARK_METRIC,
@@ -5570,7 +5693,8 @@ if NULL_BENCHMARK_ENABLED:
             min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
             overfit_guard_enabled=OVERFIT_GUARD_ENABLED,
             overfit_guard_metric_scope=OVERFIT_GUARD_METRIC_SCOPE,
-            overfit_guard_min_valid_rmse_reduction=OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION,
+            overfit_guard_metric_name=EXPERIMENT_METRIC_LOWER,
+            overfit_guard_min_valid_reduction=OVERFIT_GUARD_MIN_VALID_REDUCTION,
             overfit_guard_max_valid_after_over_baseline=OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE,
             overfit_guard_max_valid_train_gap=OVERFIT_GUARD_MAX_VALID_TRAIN_GAP,
             overfit_guard_use_test=OVERFIT_GUARD_USE_TEST,
@@ -5805,23 +5929,25 @@ if NULL_BENCHMARK_ENABLED:
 Feature ranking metric이 올바르게 계산됐는지 대표 feature로 직접 다시 확인합니다.
 
 - 각 defect의 round 1에서 상위, 중간, 하위 feature를 하나씩 고릅니다.
-- 같은 residual model을 다시 학습해 validation RMSE를 직접 계산합니다.
+- 같은 residual model을 다시 학습해 설정된 validation loss를 직접 계산합니다.
 - ranking CSV의 저장값과 직접 계산값이 같으면 `PASS=True`로 표시합니다.
 - round 1은 이전에 선택된 feature가 없어 baseline에서 바로 재현할 수 있으므로 검산 기준으로 사용합니다.
 
 --- CELL 17 [code] ---
-from feature_boosting.metrics import rmse
+from feature_boosting.metrics import mae, rmse
 from feature_boosting.modeling import fit_regressor, predict_regressor
 
 METRIC_CHECK_ENABLED = True
 METRIC_CHECK_ROUND = 1
 METRIC_CHECK_TOLERANCE = 1e-7
+METRIC_CHECK_NAME = EXPERIMENT_METRIC_LOWER
+METRIC_CHECK_FUNCTION = mae if METRIC_CHECK_NAME == "mae" else rmse
 METRIC_CHECK_DIR = OUT_DIR / "metric_check"
 METRIC_CHECK_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _metric_check_representatives(ranking):
-    metric_col = "valid_bad_rmse_after_over_baseline"
+    metric_col = f"valid_bad_{METRIC_CHECK_NAME}_after_over_baseline"
     work = ranking.copy()
     if "fail_reason" in work.columns:
         work = work[work["fail_reason"].fillna("").astype(str).eq("")]
@@ -5882,8 +6008,8 @@ if METRIC_CHECK_ENABLED:
             print(f"[{defect_id}] metric check skipped: no validation bad samples")
             continue
 
-        bad_before = rmse(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
-        global_before = rmse(y_valid_check, baseline_valid_check)
+        bad_before = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
+        global_before = METRIC_CHECK_FUNCTION(y_valid_check, baseline_valid_check)
 
         for _, ranking_row in representatives.iterrows():
             feature_name = str(ranking_row["feature_name"])
@@ -5894,14 +6020,14 @@ if METRIC_CHECK_ENABLED:
             correction = predict_regressor(model, valid_df, [feature_name])
             pred_after = baseline_valid_check + correction
 
-            direct_bad_after = rmse(y_valid_check[bad_mask], pred_after[bad_mask])
+            direct_bad_after = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], pred_after[bad_mask])
             direct_bad_ratio = direct_bad_after / bad_before
-            direct_global_after = rmse(y_valid_check, pred_after)
+            direct_global_after = METRIC_CHECK_FUNCTION(y_valid_check, pred_after)
             direct_global_ratio = direct_global_after / global_before
-            stored_bad_after = float(ranking_row["valid_bad_rmse_after"])
-            stored_bad_ratio = float(ranking_row["valid_bad_rmse_after_over_baseline"])
-            stored_global_after = float(ranking_row["valid_global_rmse_after"])
-            stored_global_ratio = float(ranking_row["valid_global_rmse_after_over_baseline"])
+            stored_bad_after = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after"])
+            stored_bad_ratio = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after_over_baseline"])
+            stored_global_after = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_after"])
+            stored_global_ratio = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_after_over_baseline"])
 
             checks = [
                 _metric_values_match(stored_bad_after, direct_bad_after),
@@ -5914,6 +6040,7 @@ if METRIC_CHECK_ENABLED:
                 "round": METRIC_CHECK_ROUND,
                 "check_position": ranking_row["check_position"],
                 "feature_name": feature_name,
+                "metric_name": METRIC_CHECK_NAME,
                 "stored_bad_ratio": stored_bad_ratio,
                 "direct_bad_ratio": direct_bad_ratio,
                 "bad_ratio_abs_diff": abs(stored_bad_ratio - direct_bad_ratio),
@@ -5950,15 +6077,17 @@ else:
 
 - defect별 rank 1 feature를 모으고 중복 feature는 한 번만 사용합니다.
 - `base features + rank 1 features`로 CatBoost 수율 모델을 500 iteration까지 학습합니다.
-- iteration마다 train, valid, test의 RMSE와 R2를 계산합니다.
-- 최적 iteration은 validation RMSE만으로 정하고 test는 결과 확인에만 사용합니다.
+- iteration마다 train, valid, test의 설정 loss와 R2를 계산합니다.
+- 최적 iteration은 validation loss만으로 정하고 test는 결과 확인에만 사용합니다.
 
 --- CELL 19 [code] ---
-from feature_boosting.metrics import r2, rmse
+from feature_boosting.metrics import mae, r2, rmse
 
 TOP1_CURVE_ENABLED = True
 TOP1_CURVE_RANKING_ROUND = 1
 TOP1_CURVE_ITERATIONS = 500
+TOP1_CURVE_METRIC_NAME = EXPERIMENT_METRIC_LOWER
+TOP1_CURVE_METRIC_FUNCTION = mae if TOP1_CURVE_METRIC_NAME == "mae" else rmse
 TOP1_CURVE_DIR = OUT_DIR / "base_plus_rank1_curve"
 TOP1_CURVE_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -5992,8 +6121,9 @@ if TOP1_CURVE_ENABLED:
             "rank": 1,
             "feature_name": feature_name,
             "ranking_metric": row.get("ranking_metric", ""),
-            "valid_bad_rmse_reduction": row.get("valid_bad_rmse_reduction", np.nan),
-            "valid_bad_rmse_after_over_baseline": row.get("valid_bad_rmse_after_over_baseline", np.nan),
+            "metric_name": TOP1_CURVE_METRIC_NAME,
+            "valid_bad_metric_reduction": row.get(f"valid_bad_{TOP1_CURVE_METRIC_NAME}_reduction", np.nan),
+            "valid_bad_metric_after_over_baseline": row.get(f"valid_bad_{TOP1_CURVE_METRIC_NAME}_after_over_baseline", np.nan),
             "selected_in_boosting": bool(row.get("selected", False)),
             "overfit_guard_pass": bool(row.get("overfit_guard_pass", False)),
         })
@@ -6062,9 +6192,10 @@ if TOP1_CURVE_ENABLED and top1_feature_cols:
     ):
         curve_rows.append({
             "iteration": iteration,
-            "train_rmse": rmse(y_train_curve, pred_train),
-            "valid_rmse": rmse(y_valid_curve, pred_valid),
-            "test_rmse": rmse(y_test_curve, pred_test),
+            "metric_name": TOP1_CURVE_METRIC_NAME,
+            "train_loss": TOP1_CURVE_METRIC_FUNCTION(y_train_curve, pred_train),
+            "valid_loss": TOP1_CURVE_METRIC_FUNCTION(y_valid_curve, pred_valid),
+            "test_loss": TOP1_CURVE_METRIC_FUNCTION(y_test_curve, pred_test),
             "train_r2": r2(y_train_curve, pred_train),
             "valid_r2": r2(y_valid_curve, pred_valid),
             "test_r2": r2(y_test_curve, pred_test),
@@ -6073,16 +6204,17 @@ if TOP1_CURVE_ENABLED and top1_feature_cols:
     top1_learning_curve = pd.DataFrame(curve_rows)
     write_csv(top1_learning_curve, TOP1_CURVE_DIR / "base_plus_rank1_learning_curve.csv")
 
-    best_idx = top1_learning_curve["valid_rmse"].idxmin()
+    best_idx = top1_learning_curve["valid_loss"].idxmin()
     best_row = top1_learning_curve.loc[best_idx].copy()
     top1_learning_curve_summary = pd.DataFrame([{
         "n_base_features": len(base_feature_cols),
         "n_rank1_features": len(top1_feature_cols),
         "rank1_features": ", ".join(top1_feature_cols),
-        "best_iteration_by_valid_rmse": int(best_row["iteration"]),
-        "train_rmse_at_best": best_row["train_rmse"],
-        "valid_rmse_at_best": best_row["valid_rmse"],
-        "test_rmse_at_best": best_row["test_rmse"],
+        "metric_name": TOP1_CURVE_METRIC_NAME,
+        "best_iteration_by_valid_loss": int(best_row["iteration"]),
+        "train_loss_at_best": best_row["train_loss"],
+        "valid_loss_at_best": best_row["valid_loss"],
+        "test_loss_at_best": best_row["test_loss"],
         "train_r2_at_best": best_row["train_r2"],
         "valid_r2_at_best": best_row["valid_r2"],
         "test_r2_at_best": best_row["test_r2"],
@@ -6097,7 +6229,7 @@ if TOP1_CURVE_ENABLED and top1_feature_cols:
     for split_name in ["train", "valid", "test"]:
         axes[0].plot(
             top1_learning_curve["iteration"],
-            top1_learning_curve[f"{split_name}_rmse"],
+            top1_learning_curve[f"{split_name}_loss"],
             label=split_name,
             color=colors[split_name],
         )
@@ -6115,12 +6247,12 @@ if TOP1_CURVE_ENABLED and top1_feature_cols:
         ax.grid(alpha=0.25)
         ax.legend()
 
-    axes[0].set_title("base + rank 1 features: RMSE by iteration")
-    axes[0].set_ylabel("RMSE loss")
+    axes[0].set_title(f"base + rank 1 features: {EXPERIMENT_METRIC} by iteration")
+    axes[0].set_ylabel(f"{EXPERIMENT_METRIC} loss")
     axes[1].set_title("base + rank 1 features: R2 by iteration")
     axes[1].set_ylabel("R2")
     fig.tight_layout()
-    fig.savefig(TOP1_CURVE_DIR / "base_plus_rank1_rmse_r2_curve.png", dpi=150, bbox_inches="tight")
+    fig.savefig(TOP1_CURVE_DIR / "base_plus_rank1_loss_r2_curve.png", dpi=150, bbox_inches="tight")
     display(fig)
 elif TOP1_CURVE_ENABLED:
     print("Section 6-3 skipped: no rank 1 feature was found. Run section 6 first.")
@@ -6135,7 +6267,7 @@ elif TOP1_CURVE_ENABLED:
 - final CatBoost 회귀 모델을 새로 학습합니다.
 - baseline 모델과 final 모델의 train/valid/test 및 defect bad/good group 성능을 비교합니다.
 - final feature 구성을 막대 차트로 보여줍니다.
-- baseline vs final RMSE/MAE를 split별 비교 차트로 보여줍니다.
+- baseline vs final 성능을 설정된 `EXPERIMENT_METRIC` 기준으로 비교합니다.
 
 **입력**: `selected_features`, `base_feature_cols`, `all_df`  
 **출력**: `final_model`, `final_pred`, `final_model_metrics.csv`, `final_model_metric_summary.csv`, `plots/final_model_metric_comparison.png`
@@ -6205,6 +6337,7 @@ write_csv(final_metric_summary_df, OUT_DIR / "final_model_metric_summary.csv")
 fig = plot_final_metric_comparison(
     final_metric_summary_df,
     output_path=OUT_DIR / "plots" / "final_model_metric_comparison.png",
+    metrics=(EXPERIMENT_METRIC_LOWER,),
 )
 if fig is not None:
     display(fig)
@@ -6355,10 +6488,11 @@ def _add_block_split_metrics(row, *, prefix, df, y, before_pred, after_pred, bas
 def _apply_block_overfit_guard(row):
     scope = OVERFIT_GUARD_METRIC_SCOPE
     row["overfit_guard_scope"] = scope
+    row["overfit_guard_metric"] = EXPERIMENT_METRIC_LOWER
     if row.get("fail_reason"):
         row["overfit_guard_pass"] = False
         row["overfit_guard_reason"] = f"not_evaluated:{row.get('fail_reason')}"
-        row["overfit_gap_valid_train_rmse_ratio"] = np.nan
+        row["overfit_gap_valid_train_metric_ratio"] = np.nan
         return row
     if not OVERFIT_GUARD_ENABLED:
         row["overfit_guard_pass"] = True
@@ -6366,16 +6500,16 @@ def _apply_block_overfit_guard(row):
         return row
 
     reasons = []
-    valid_reduction_col = f"valid_{scope}_rmse_reduction"
-    valid_ratio_col = f"valid_{scope}_rmse_after_over_baseline"
-    train_ratio_col = f"train_{scope}_rmse_after_over_baseline"
-    test_ratio_col = f"test_{scope}_rmse_after_over_baseline"
+    valid_reduction_col = f"valid_{scope}_{EXPERIMENT_METRIC_LOWER}_reduction"
+    valid_ratio_col = f"valid_{scope}_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
+    train_ratio_col = f"train_{scope}_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
+    test_ratio_col = f"test_{scope}_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
 
     valid_reduction = _safe_float(row.get(valid_reduction_col))
-    if OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION is not None and (
-        not np.isfinite(valid_reduction) or valid_reduction <= float(OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION)
+    if OVERFIT_GUARD_MIN_VALID_REDUCTION is not None and (
+        not np.isfinite(valid_reduction) or valid_reduction <= float(OVERFIT_GUARD_MIN_VALID_REDUCTION)
     ):
-        reasons.append(f"{valid_reduction_col}<={float(OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION):g}")
+        reasons.append(f"{valid_reduction_col}<={float(OVERFIT_GUARD_MIN_VALID_REDUCTION):g}")
 
     valid_ratio = _safe_float(row.get(valid_ratio_col))
     if OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE is not None and (
@@ -6385,9 +6519,9 @@ def _apply_block_overfit_guard(row):
 
     train_ratio = _safe_float(row.get(train_ratio_col))
     gap = valid_ratio - train_ratio if np.isfinite(valid_ratio) and np.isfinite(train_ratio) else float("nan")
-    row["overfit_gap_valid_train_rmse_ratio"] = gap
+    row["overfit_gap_valid_train_metric_ratio"] = gap
     if OVERFIT_GUARD_MAX_VALID_TRAIN_GAP is not None and np.isfinite(gap) and gap > float(OVERFIT_GUARD_MAX_VALID_TRAIN_GAP):
-        reasons.append(f"valid_train_{scope}_rmse_ratio_gap>{float(OVERFIT_GUARD_MAX_VALID_TRAIN_GAP):g}")
+        reasons.append(f"valid_train_{scope}_{EXPERIMENT_METRIC_LOWER}_ratio_gap>{float(OVERFIT_GUARD_MAX_VALID_TRAIN_GAP):g}")
 
     if OVERFIT_GUARD_USE_TEST:
         test_ratio = _safe_float(row.get(test_ratio_col))
@@ -6509,7 +6643,7 @@ if BLOCK_EXPERIMENT_ENABLED:
             residual_model_params=RESIDUAL_MODEL_PARAMS,
             n_rounds=1,
             select_per_round=SELECT_PER_ROUND,
-            main_metric="bad_rmse_reduction",
+            main_metric=BOOSTING_SELECTION_METRIC,
             min_improvement=MIN_IMPROVEMENT,
             selection_mode=BOOSTING_SELECTION_MODE,
             selection_metric=BOOSTING_SELECTION_METRIC,
@@ -6520,7 +6654,8 @@ if BLOCK_EXPERIMENT_ENABLED:
             min_valid_bad_samples=MIN_VALID_BAD_SAMPLES,
             overfit_guard_enabled=OVERFIT_GUARD_ENABLED,
             overfit_guard_metric_scope=OVERFIT_GUARD_METRIC_SCOPE,
-            overfit_guard_min_valid_rmse_reduction=OVERFIT_GUARD_MIN_VALID_RMSE_REDUCTION,
+            overfit_guard_metric_name=EXPERIMENT_METRIC_LOWER,
+            overfit_guard_min_valid_reduction=OVERFIT_GUARD_MIN_VALID_REDUCTION,
             overfit_guard_max_valid_after_over_baseline=OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE,
             overfit_guard_max_valid_train_gap=OVERFIT_GUARD_MAX_VALID_TRAIN_GAP,
             overfit_guard_use_test=OVERFIT_GUARD_USE_TEST,
@@ -6732,7 +6867,7 @@ if BLOCK_EXPERIMENT_ENABLED:
         work["_curve_order"] = np.arange(len(work))
         return work.sort_values(["round", "_curve_order"]).iloc[-1]
 
-    def _baseline_rmse_for(defect_id, *, split, group):
+    def _baseline_metric_for(defect_id, *, split, group):
         if baseline_summary is None or baseline_summary.empty:
             return np.nan
         key_defect = "global" if group == "global" else str(defect_id)
@@ -6744,23 +6879,24 @@ if BLOCK_EXPERIMENT_ENABLED:
         ]
         if rows.empty:
             return np.nan
-        return pd.to_numeric(rows["rmse"], errors="coerce").iloc[0]
+        return pd.to_numeric(rows[EXPERIMENT_METRIC_LOWER], errors="coerce").iloc[0]
 
     def _curve_row_as_comparison(row, *, defect_id, method, metric_source, selected_features_text):
-        valid_bad = row.get("valid_bad_rmse", np.nan)
-        test_bad = row.get("test_bad_rmse", np.nan)
-        valid_global = row.get("valid_global_rmse", np.nan)
+        valid_bad = row.get(f"valid_bad_{EXPERIMENT_METRIC_LOWER}", np.nan)
+        test_bad = row.get(f"test_bad_{EXPERIMENT_METRIC_LOWER}", np.nan)
+        valid_global = row.get(f"valid_global_{EXPERIMENT_METRIC_LOWER}", np.nan)
         return {
             "defect_id": defect_id,
             "method": method,
             "metric_source": metric_source,
+            "metric_name": EXPERIMENT_METRIC_LOWER,
             "selected_features": selected_features_text,
-            "valid_bad_rmse_after": valid_bad,
-            "valid_bad_rmse_after_over_baseline": _safe_ratio(valid_bad, _baseline_rmse_for(defect_id, split="valid", group="bad")),
-            "test_bad_rmse_after": test_bad,
-            "test_bad_rmse_after_over_baseline": _safe_ratio(test_bad, _baseline_rmse_for(defect_id, split="test", group="bad")),
-            "valid_global_rmse_after": valid_global,
-            "valid_global_rmse_after_over_baseline": _safe_ratio(valid_global, _baseline_rmse_for(defect_id, split="valid", group="global")),
+            "valid_bad_loss_after": valid_bad,
+            "valid_bad_loss_after_over_baseline": _safe_ratio(valid_bad, _baseline_metric_for(defect_id, split="valid", group="bad")),
+            "test_bad_loss_after": test_bad,
+            "test_bad_loss_after_over_baseline": _safe_ratio(test_bad, _baseline_metric_for(defect_id, split="test", group="bad")),
+            "valid_global_loss_after": valid_global,
+            "valid_global_loss_after_over_baseline": _safe_ratio(valid_global, _baseline_metric_for(defect_id, split="valid", group="global")),
         }
 
     residual_comparison_rows = []
@@ -6805,12 +6941,13 @@ if BLOCK_EXPERIMENT_ENABLED:
                     "method": "block_preselection_then_feature",
                     "metric_source": "selected feature set refit",
                     "selected_features": ", ".join(block_features),
-                    "valid_bad_rmse_after": block_set_row.get("valid_bad_rmse_after", np.nan),
-                    "valid_bad_rmse_after_over_baseline": block_set_row.get("valid_bad_rmse_after_over_baseline", np.nan),
-                    "test_bad_rmse_after": block_set_row.get("test_bad_rmse_after", np.nan),
-                    "test_bad_rmse_after_over_baseline": block_set_row.get("test_bad_rmse_after_over_baseline", np.nan),
-                    "valid_global_rmse_after": block_set_row.get("valid_global_rmse_after", np.nan),
-                    "valid_global_rmse_after_over_baseline": block_set_row.get("valid_global_rmse_after_over_baseline", np.nan),
+                    "metric_name": EXPERIMENT_METRIC_LOWER,
+                    "valid_bad_loss_after": block_set_row.get(f"valid_bad_{EXPERIMENT_METRIC_LOWER}_after", np.nan),
+                    "valid_bad_loss_after_over_baseline": block_set_row.get(f"valid_bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline", np.nan),
+                    "test_bad_loss_after": block_set_row.get(f"test_bad_{EXPERIMENT_METRIC_LOWER}_after", np.nan),
+                    "test_bad_loss_after_over_baseline": block_set_row.get(f"test_bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline", np.nan),
+                    "valid_global_loss_after": block_set_row.get(f"valid_global_{EXPERIMENT_METRIC_LOWER}_after", np.nan),
+                    "valid_global_loss_after_over_baseline": block_set_row.get(f"valid_global_{EXPERIMENT_METRIC_LOWER}_after_over_baseline", np.nan),
                 }
             )
         else:

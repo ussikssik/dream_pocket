@@ -35,6 +35,8 @@ class ResidualFeatureBoosterConfig:
     min_valid_bad_samples: int = 1
     overfit_guard_enabled: bool = True
     overfit_guard_metric_scope: str = "bad"
+    overfit_guard_metric_name: str = "rmse"
+    overfit_guard_min_valid_reduction: float | None = None
     overfit_guard_min_valid_rmse_reduction: float | None = 0.0
     overfit_guard_max_valid_after_over_baseline: float | None = 1.0
     overfit_guard_max_valid_train_gap: float | None = 0.25
@@ -321,7 +323,10 @@ class ResidualFeatureBooster:
             "overfit_guard_pass": False,
             "overfit_guard_reason": "",
             "overfit_guard_scope": self.config.overfit_guard_metric_scope,
+            "overfit_guard_metric": self.config.overfit_guard_metric_name,
+            "overfit_gap_valid_train_metric_ratio": np.nan,
             "overfit_gap_valid_train_rmse_ratio": np.nan,
+            "overfit_gap_valid_train_mae_ratio": np.nan,
         }
         base_row.update(_empty_baseline_ratio_columns())
         if quality:
@@ -404,28 +409,37 @@ class ResidualFeatureBooster:
 
     def _apply_overfit_guard(self, row: dict[str, Any]) -> None:
         scope = _normalize_guard_scope(self.config.overfit_guard_metric_scope)
+        metric_name = _normalize_guard_metric(self.config.overfit_guard_metric_name)
+        metric_gap_col = f"overfit_gap_valid_train_{metric_name}_ratio"
         row["overfit_guard_scope"] = scope
+        row["overfit_guard_metric"] = metric_name
         if row.get("fail_reason"):
             row["overfit_guard_pass"] = False
             row["overfit_guard_reason"] = f"not_evaluated:{row.get('fail_reason')}"
+            row["overfit_gap_valid_train_metric_ratio"] = np.nan
+            row[metric_gap_col] = np.nan
             row["overfit_gap_valid_train_rmse_ratio"] = np.nan
             return
         if not self.config.overfit_guard_enabled:
             row["overfit_guard_pass"] = True
             row["overfit_guard_reason"] = ""
-            row["overfit_gap_valid_train_rmse_ratio"] = _safe_float(row.get(f"valid_{scope}_rmse_after_over_baseline")) - _safe_float(
-                row.get(f"train_{scope}_rmse_after_over_baseline")
+            gap = _safe_float(row.get(f"valid_{scope}_{metric_name}_after_over_baseline")) - _safe_float(
+                row.get(f"train_{scope}_{metric_name}_after_over_baseline")
             )
+            row["overfit_gap_valid_train_metric_ratio"] = gap
+            row[metric_gap_col] = gap
             return
 
         reasons: list[str] = []
-        valid_reduction_col = f"valid_{scope}_rmse_reduction"
-        valid_ratio_col = f"valid_{scope}_rmse_after_over_baseline"
-        train_ratio_col = f"train_{scope}_rmse_after_over_baseline"
-        test_ratio_col = f"test_{scope}_rmse_after_over_baseline"
+        valid_reduction_col = f"valid_{scope}_{metric_name}_reduction"
+        valid_ratio_col = f"valid_{scope}_{metric_name}_after_over_baseline"
+        train_ratio_col = f"train_{scope}_{metric_name}_after_over_baseline"
+        test_ratio_col = f"test_{scope}_{metric_name}_after_over_baseline"
 
         valid_reduction = _safe_float(row.get(valid_reduction_col))
-        min_reduction = self.config.overfit_guard_min_valid_rmse_reduction
+        min_reduction = self.config.overfit_guard_min_valid_reduction
+        if min_reduction is None:
+            min_reduction = self.config.overfit_guard_min_valid_rmse_reduction
         if min_reduction is not None and (not np.isfinite(valid_reduction) or valid_reduction <= float(min_reduction)):
             reasons.append(f"{valid_reduction_col}<={float(min_reduction):g}")
 
@@ -436,10 +450,11 @@ class ResidualFeatureBooster:
 
         train_ratio = _safe_float(row.get(train_ratio_col))
         gap = valid_ratio - train_ratio if np.isfinite(valid_ratio) and np.isfinite(train_ratio) else float("nan")
-        row["overfit_gap_valid_train_rmse_ratio"] = gap
+        row["overfit_gap_valid_train_metric_ratio"] = gap
+        row[metric_gap_col] = gap
         max_gap = self.config.overfit_guard_max_valid_train_gap
         if max_gap is not None and np.isfinite(gap) and gap > float(max_gap):
-            reasons.append(f"valid_train_{scope}_rmse_ratio_gap>{float(max_gap):g}")
+            reasons.append(f"valid_train_{scope}_{metric_name}_ratio_gap>{float(max_gap):g}")
 
         if self.config.overfit_guard_use_test:
             test_ratio = _safe_float(row.get(test_ratio_col))
@@ -522,8 +537,11 @@ class ResidualFeatureBooster:
             "test_good_rmse": rmse(y_test[test_good], current_pred_test[test_good]),
             "test_good_mae": mae(y_test[test_good], current_pred_test[test_good]),
             "train_global_rmse": rmse(y_train, current_pred_train),
+            "train_global_mae": mae(y_train, current_pred_train),
             "valid_global_rmse": rmse(y_valid, current_pred_valid),
+            "valid_global_mae": mae(y_valid, current_pred_valid),
             "test_global_rmse": rmse(y_test, current_pred_test),
+            "test_global_mae": mae(y_test, current_pred_test),
         }
 
 
@@ -583,6 +601,13 @@ def _normalize_guard_scope(scope: str) -> str:
     if normalized in {"bad", "good", "global"}:
         return normalized
     raise ValueError(f"unsupported overfit_guard_metric_scope: {scope!r}")
+
+
+def _normalize_guard_metric(metric_name: str) -> str:
+    normalized = str(metric_name).strip().lower()
+    if normalized in {"rmse", "mae"}:
+        return normalized
+    raise ValueError(f"unsupported overfit_guard_metric_name: {metric_name!r}")
 
 
 def _main_metric_name(metric: str, use_test_for_selection: bool) -> str:
@@ -680,10 +705,39 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "test_global_rmse_after",
         "test_global_rmse_reduction",
         "test_global_rmse_after_over_baseline",
+        "train_bad_mae_baseline",
+        "train_bad_mae_before",
+        "train_bad_mae_after",
+        "train_bad_mae_reduction",
+        "train_bad_mae_after_over_baseline",
+        "valid_bad_mae_baseline",
+        "valid_bad_mae_before",
+        "valid_bad_mae_after",
+        "valid_bad_mae_reduction",
+        "valid_bad_mae_after_over_baseline",
+        "valid_bad_mae_reduction_from_baseline_pct",
+        "test_bad_mae_before",
+        "test_bad_mae_after",
+        "test_bad_mae_reduction",
+        "test_bad_mae_after_over_baseline",
+        "valid_good_mae_reduction",
+        "test_good_mae_reduction",
+        "valid_global_mae_after",
+        "valid_global_mae_reduction",
+        "valid_global_mae_after_over_baseline",
+        "train_global_mae_after",
+        "train_global_mae_reduction",
+        "train_global_mae_after_over_baseline",
+        "test_global_mae_after",
+        "test_global_mae_reduction",
+        "test_global_mae_after_over_baseline",
         "overfit_guard_pass",
         "overfit_guard_reason",
         "overfit_guard_scope",
+        "overfit_guard_metric",
+        "overfit_gap_valid_train_metric_ratio",
         "overfit_gap_valid_train_rmse_ratio",
+        "overfit_gap_valid_train_mae_ratio",
     ]
     return {key: row.get(key, np.nan) for key in keys}
 

@@ -9,6 +9,7 @@ def recommend_overfit_safe_settings(
     n_train_rows: int,
     n_candidate_features: int,
     n_base_features: int = 0,
+    metric_name: str = "rmse",
 ) -> dict[str, Any]:
     """Return conservative residual-model and guard settings for early trials.
 
@@ -45,9 +46,15 @@ def recommend_overfit_safe_settings(
     params.setdefault("thread_count", 1)
     params.setdefault("verbose", False)
 
+    guard_metric = str(metric_name).strip().lower()
+    if guard_metric not in {"rmse", "mae"}:
+        raise ValueError(f"unsupported metric_name: {metric_name!r}")
+
     guard = {
         "overfit_guard_enabled": True,
         "overfit_guard_metric_scope": "bad",
+        "overfit_guard_metric_name": guard_metric,
+        "overfit_guard_min_valid_reduction": 0.0,
         "overfit_guard_min_valid_rmse_reduction": 0.0,
         "overfit_guard_max_valid_after_over_baseline": 1.0,
         "overfit_guard_max_valid_train_gap": float(limits["valid_train_gap"]),
@@ -70,6 +77,7 @@ def recommend_overfit_safe_settings(
             {"setting": "base_features", "value": int(n_base_features)},
             {"setting": "candidate_features_per_train_row", "value": round(pressure, 4)},
             {"setting": "residual_param_changes", "value": "; ".join(changes) if changes else "none"},
+            {"setting": "overfit_guard_metric_name", "value": guard["overfit_guard_metric_name"]},
             {"setting": "overfit_guard_max_valid_after_over_baseline", "value": guard["overfit_guard_max_valid_after_over_baseline"]},
             {"setting": "overfit_guard_max_valid_train_gap", "value": guard["overfit_guard_max_valid_train_gap"]},
             {"setting": "overfit_guard_use_test", "value": guard["overfit_guard_use_test"]},

@@ -90,9 +90,17 @@ def baseline_residual_summary(
     return pd.DataFrame(rows)
 
 
-def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_by_defect: dict[str, Any] | None = None) -> None:
+def plot_residual_curve(
+    curve: pd.DataFrame,
+    output_dir: Path,
+    answer_features_by_defect: dict[str, Any] | None = None,
+    metric_name: str = "rmse",
+) -> None:
     if curve.empty:
         return
+    metric = str(metric_name).strip().lower()
+    if metric not in {"rmse", "mae"}:
+        raise ValueError(f"unsupported residual curve metric: {metric_name!r}")
     try:
         import matplotlib.pyplot as plt
     except Exception:
@@ -100,25 +108,26 @@ def plot_residual_curve(curve: pd.DataFrame, output_dir: Path, answer_features_b
     for defect_id, group in curve.groupby("defect_id", sort=False):
         fig, ax = plt.subplots(figsize=(8, 4))
         for split, color in (("train", "#59a14f"), ("valid", "#4e79a7"), ("test", "#e15759")):
-            col = f"{split}_bad_rmse"
+            col = f"{split}_bad_{metric}"
             if col in group.columns:
-                ax.plot(group["round"], group[col], marker="o", color=color, label=f"{split} bad RMSE")
+                ax.plot(group["round"], group[col], marker="o", color=color, label=f"{split} bad {metric.upper()}")
         answer_rules = answer_features_by_defect.get(str(defect_id), []) if answer_features_by_defect else []
         if answer_rules and "selected_feature" in group.columns:
             answers = group[answer_feature_mask(group["selected_feature"], answer_rules)]
             if not answers.empty:
-                ax.scatter(answers["round"], answers["valid_bad_rmse"], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
+                valid_col = f"valid_bad_{metric}"
+                ax.scatter(answers["round"], answers[valid_col], marker="X", s=130, color="#2a9d8f", label="answer feature", zorder=6)
                 for _, row in answers.iterrows():
                     ax.annotate(
                         str(row.get("selected_feature", ""))[:24],
-                        (row["round"], row["valid_bad_rmse"]),
+                        (row["round"], row[valid_col]),
                         textcoords="offset points",
                         xytext=(5, 6),
                         fontsize=8,
                         color="#2a9d8f",
                     )
         ax.set_xlabel("round")
-        ax.set_ylabel("RMSE")
+        ax.set_ylabel(metric.upper())
         ax.set_title(f"{defect_id} residual curve")
         ax.grid(alpha=0.25)
         ax.legend()
