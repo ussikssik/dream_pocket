@@ -5800,6 +5800,150 @@ if NULL_BENCHMARK_ENABLED:
         print("null competition plot skipped:", type(exc).__name__, exc)
 
 --- CELL 16 [markdown] ---
+## 6-2. Feature ranking metric direct check
+
+Feature ranking metric이 올바르게 계산됐는지 대표 feature로 직접 다시 확인합니다.
+
+- 각 defect의 round 1에서 상위, 중간, 하위 feature를 하나씩 고릅니다.
+- 같은 residual model을 다시 학습해 validation RMSE를 직접 계산합니다.
+- ranking CSV의 저장값과 직접 계산값이 같으면 `PASS=True`로 표시합니다.
+- round 1은 이전에 선택된 feature가 없어 baseline에서 바로 재현할 수 있으므로 검산 기준으로 사용합니다.
+
+--- CELL 17 [code] ---
+from feature_boosting.metrics import rmse
+from feature_boosting.modeling import fit_regressor, predict_regressor
+
+METRIC_CHECK_ENABLED = True
+METRIC_CHECK_ROUND = 1
+METRIC_CHECK_TOLERANCE = 1e-7
+METRIC_CHECK_DIR = OUT_DIR / "metric_check"
+METRIC_CHECK_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _metric_check_representatives(ranking):
+    metric_col = "valid_bad_rmse_after_over_baseline"
+    work = ranking.copy()
+    if "fail_reason" in work.columns:
+        work = work[work["fail_reason"].fillna("").astype(str).eq("")]
+    work[metric_col] = pd.to_numeric(work[metric_col], errors="coerce")
+    work = work.dropna(subset=[metric_col]).sort_values(metric_col).reset_index(drop=True)
+    if work.empty:
+        return work
+
+    frames = []
+    used = set()
+    for label, idx in [("best", 0), ("middle", len(work) // 2), ("worst", len(work) - 1)]:
+        feature_name = str(work.iloc[idx]["feature_name"])
+        if feature_name in used:
+            continue
+        used.add(feature_name)
+        row = work.iloc[[idx]].copy()
+        row["check_position"] = label
+        frames.append(row)
+    return pd.concat(frames, ignore_index=True) if frames else work.iloc[0:0].copy()
+
+
+def _metric_values_match(stored, recalculated):
+    return bool(np.isclose(
+        float(stored),
+        float(recalculated),
+        rtol=METRIC_CHECK_TOLERANCE,
+        atol=METRIC_CHECK_TOLERANCE,
+    ))
+
+
+metric_check_rows = []
+
+if METRIC_CHECK_ENABLED:
+    if int(METRIC_CHECK_ROUND) != 1:
+        raise ValueError("Direct metric check currently supports round 1 only.")
+
+    y_train_check = train_df[TARGET_COL].to_numpy(dtype=float)
+    y_valid_check = valid_df[TARGET_COL].to_numpy(dtype=float)
+    baseline_train_check = train_df["baseline_pred"].to_numpy(dtype=float)
+    baseline_valid_check = valid_df["baseline_pred"].to_numpy(dtype=float)
+    residual_train_check = y_train_check - baseline_train_check
+    residual_valid_check = y_valid_check - baseline_valid_check
+
+    for defect in DEFECTS:
+        defect_id = str(defect["defect_id"])
+        ranking_path = OUT_DIR / "rankings" / f"{defect_id}_round_{METRIC_CHECK_ROUND}.csv"
+        if not ranking_path.exists():
+            print(f"[{defect_id}] metric check skipped: ranking file not found")
+            continue
+
+        representatives = _metric_check_representatives(pd.read_csv(ranking_path))
+        if representatives.empty:
+            print(f"[{defect_id}] metric check skipped: no valid ranking rows")
+            continue
+
+        bad_mask = valid_df[ID_COL].astype(str).isin(defect_groups[defect_id]["bad"]).to_numpy()
+        if not bad_mask.any():
+            print(f"[{defect_id}] metric check skipped: no validation bad samples")
+            continue
+
+        bad_before = rmse(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
+        global_before = rmse(y_valid_check, baseline_valid_check)
+
+        for _, ranking_row in representatives.iterrows():
+            feature_name = str(ranking_row["feature_name"])
+            model = fit_regressor(
+                train_df, residual_train_check, valid_df, residual_valid_check,
+                [feature_name], RESIDUAL_MODEL_PARAMS,
+            )
+            correction = predict_regressor(model, valid_df, [feature_name])
+            pred_after = baseline_valid_check + correction
+
+            direct_bad_after = rmse(y_valid_check[bad_mask], pred_after[bad_mask])
+            direct_bad_ratio = direct_bad_after / bad_before
+            direct_global_after = rmse(y_valid_check, pred_after)
+            direct_global_ratio = direct_global_after / global_before
+            stored_bad_after = float(ranking_row["valid_bad_rmse_after"])
+            stored_bad_ratio = float(ranking_row["valid_bad_rmse_after_over_baseline"])
+            stored_global_after = float(ranking_row["valid_global_rmse_after"])
+            stored_global_ratio = float(ranking_row["valid_global_rmse_after_over_baseline"])
+
+            checks = [
+                _metric_values_match(stored_bad_after, direct_bad_after),
+                _metric_values_match(stored_bad_ratio, direct_bad_ratio),
+                _metric_values_match(stored_global_after, direct_global_after),
+                _metric_values_match(stored_global_ratio, direct_global_ratio),
+            ]
+            metric_check_rows.append({
+                "defect_id": defect_id,
+                "round": METRIC_CHECK_ROUND,
+                "check_position": ranking_row["check_position"],
+                "feature_name": feature_name,
+                "stored_bad_ratio": stored_bad_ratio,
+                "direct_bad_ratio": direct_bad_ratio,
+                "bad_ratio_abs_diff": abs(stored_bad_ratio - direct_bad_ratio),
+                "stored_global_ratio": stored_global_ratio,
+                "direct_global_ratio": direct_global_ratio,
+                "global_ratio_abs_diff": abs(stored_global_ratio - direct_global_ratio),
+                "PASS": all(checks),
+            })
+
+metric_check_detail = pd.DataFrame(metric_check_rows)
+if not metric_check_detail.empty:
+    metric_check_summary = (
+        metric_check_detail.groupby("defect_id", as_index=False)
+        .agg(
+            n_features_checked=("feature_name", "size"),
+            n_passed=("PASS", "sum"),
+            all_passed=("PASS", "all"),
+            max_bad_ratio_abs_diff=("bad_ratio_abs_diff", "max"),
+            max_global_ratio_abs_diff=("global_ratio_abs_diff", "max"),
+        )
+    )
+    write_csv(metric_check_detail, METRIC_CHECK_DIR / "metric_check_detail.csv")
+    write_csv(metric_check_summary, METRIC_CHECK_DIR / "metric_check_summary.csv")
+    display(metric_check_summary)
+    display(metric_check_detail)
+else:
+    metric_check_summary = pd.DataFrame()
+    print("No metric check result was created. Run section 6 first.")
+
+--- CELL 18 [markdown] ---
 ## 7. Final model: Xb + selected Xnew 재학습
 
 **이 셀에서 하는 일**
@@ -5814,7 +5958,7 @@ if NULL_BENCHMARK_ENABLED:
 **입력**: `selected_features`, `base_feature_cols`, `all_df`  
 **출력**: `final_model`, `final_pred`, `final_model_metrics.csv`, `final_model_metric_summary.csv`, `plots/final_model_metric_comparison.png`
 
---- CELL 17 [code] ---
+--- CELL 19 [code] ---
 selected_cols = []
 if not selected_features.empty:
     for feature in selected_features["feature_name"].dropna().astype(str):
@@ -5886,7 +6030,7 @@ if fig is not None:
 display(final_metric_summary_df)
 display(final_metrics)
 
---- CELL 18 [markdown] ---
+--- CELL 20 [markdown] ---
 ## 8. Optional SHAP 검증
 
 **이 셀에서 하는 일**
@@ -5901,7 +6045,7 @@ SHAP은 원인 확정이 아니라, 선택 feature가 final model에서 실제�
 **입력**: `final_model`, test set, `selected_features`  
 **출력**: `shap_summary.csv`
 
---- CELL 19 [code] ---
+--- CELL 21 [code] ---
 if SHAP_ENABLED:
     shap_summary = compute_shap_summary(
         final_model,
@@ -5918,7 +6062,7 @@ else:
 write_csv(shap_summary, OUT_DIR / "shap_summary.csv")
 display(shap_summary.head(30))
 
---- CELL 20 [markdown] ---
+--- CELL 22 [markdown] ---
 ## 9. 산출물 확인
 
 **이 셀에서 하는 일**
@@ -5930,13 +6074,13 @@ display(shap_summary.head(30))
 **입력**: `OUT_DIR`  
 **출력**: 저장된 산출물 목록
 
---- CELL 21 [code] ---
+--- CELL 23 [code] ---
 print("saved to:", OUT_DIR)
 for path in sorted(OUT_DIR.rglob("*")):
     if path.is_file():
         print(path.relative_to(OUT_DIR))
 
---- CELL 22 [markdown] ---
+--- CELL 24 [markdown] ---
 ## 10. Second experiment: block preselection residual boosting
 
 **? ??? ?? ?**
@@ -5949,7 +6093,7 @@ for path in sorted(OUT_DIR.rglob("*")):
 
 **??**: `OUT_DIR / "block_experiment"` ?? block ranking, block ?? feature ranking, ?? ?? feature CSV? plot
 
---- CELL 23 [code] ---
+--- CELL 25 [code] ---
 from feature_boosting.metrics import mae, rmse, reduction
 from feature_boosting.modeling import fit_regressor, predict_regressor
 
@@ -5968,7 +6112,7 @@ print("BLOCK_EXPERIMENT_DIR =", BLOCK_EXPERIMENT_DIR)
 print("BLOCK_SIZE =", BLOCK_SIZE)
 print("BLOCK_FINAL_SELECTION_MODE =", BLOCK_FINAL_SELECTION_MODE)
 
---- CELL 24 [code] ---
+--- CELL 26 [code] ---
 def _block_metric_name(metric, *, use_test=False):
     if metric in {"bad_rmse_reduction", "rmse_reduction"}:
         return "test_bad_rmse_reduction" if use_test else "valid_bad_rmse_reduction"
@@ -6175,7 +6319,7 @@ def _select_from_ranked_frame(frame, *, metric_col, mode, top_k, threshold, high
         selected = selected[pd.to_numeric(selected[metric_col], errors="coerce") <= float(threshold)]
     return selected
 
---- CELL 25 [code] ---
+--- CELL 27 [code] ---
 if BLOCK_EXPERIMENT_ENABLED:
     standard_one_round_start_time = time.perf_counter()
     standard_one_round_booster = ResidualFeatureBooster(
