@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from feature_boosting.reporting import final_metric_summary, round_residual_summary
+from feature_boosting.reporting import final_metric_summary, iteration_residual_summary, round_residual_summary
 
 
 class ReportingTests(unittest.TestCase):
@@ -90,6 +90,38 @@ class ReportingTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["mae_reduction"]), 1.0)
         self.assertAlmostEqual(float(row["mae_reduction_pct"]), 25.0)
         self.assertAlmostEqual(float(row["r2_delta"]), 0.15)
+
+    def test_iteration_residual_summary_uses_inherited_defect_start(self) -> None:
+        iterations = pd.DataFrame(
+            [
+                {
+                    "global_iter": 1,
+                    "defect_id": "defect_1",
+                    "round": 1,
+                    "selected_features": "feature_a",
+                    "valid_bad_mae_before": 10.0,
+                    "valid_bad_mae_after": 8.0,
+                },
+                {
+                    "global_iter": 2,
+                    "defect_id": "defect_2",
+                    "round": 1,
+                    "selected_features": "feature_b",
+                    "valid_bad_mae_before": 7.0,
+                    "valid_bad_mae_after": 5.0,
+                },
+            ]
+        )
+
+        summary = iteration_residual_summary(iterations, group="bad")
+        defect_2 = summary[
+            (summary["defect_id"].astype(str) == "defect_2")
+            & (summary["split"].astype(str) == "valid")
+        ].reset_index(drop=True)
+
+        self.assertEqual(defect_2["round"].tolist(), [0, 1])
+        self.assertEqual(defect_2["global_iter"].tolist(), [1, 2])
+        self.assertEqual(defect_2["mean_abs_residual"].tolist(), [7.0, 5.0])
 
 
 if __name__ == "__main__":

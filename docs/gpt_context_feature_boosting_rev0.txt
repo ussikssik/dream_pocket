@@ -867,13 +867,13 @@ from .reporting import (
     baseline_residual_summary,
     copy_config,
     final_metric_summary,
+    iteration_residual_summary,
     plot_candidate_loss_ranking,
     plot_final_feature_set_summary,
     plot_final_metric_comparison,
     plot_residual_curve,
     plot_round_residual_points,
     prepare_output_dir,
-    round_residual_summary,
     setup_logger,
     write_csv,
 )
@@ -967,6 +967,8 @@ def run_experiment(config_path: Path) -> int:
     quality_frames: list[pd.DataFrame] = []
     selected_frames: list[pd.DataFrame] = []
     curve_frames: list[pd.DataFrame] = []
+    iteration_frames: list[pd.DataFrame] = []
+    test_prediction_frames: list[pd.DataFrame] = []
     booster = ResidualFeatureBooster(
         ResidualFeatureBoosterConfig(
             residual_model_params=config.residual_model,
@@ -992,6 +994,14 @@ def run_experiment(config_path: Path) -> int:
             progress_every=config.boosting.progress_every,
         )
     )
+
+    sequential_predictions = {
+        "train": train_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "valid": valid_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "test": test_df["baseline_pred"].to_numpy(dtype=float).copy(),
+    }
+    global_selected_features: set[str] = set()
+    global_iter_offset = 0
 
     for defect in config.defects:
         groups = defect_groups[defect.defect_id]
@@ -1023,8 +1033,23 @@ def run_experiment(config_path: Path) -> int:
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
             quality_summary=quality,
+            initial_predictions=sequential_predictions,
+            previously_selected_features=global_selected_features,
+            global_iter_start=global_iter_offset,
+            base_feature_count=len(base_feature_cols),
             output_dir=output_dir / "rankings",
         )
+        if result.final_predictions:
+            sequential_predictions = {
+                split: values.copy() for split, values in result.final_predictions.items()
+            }
+        if not result.selected_features.empty:
+            global_selected_features.update(result.selected_features["feature_name"].dropna().astype(str))
+        global_iter_offset += len(result.rankings)
+        if not result.iteration_summary.empty:
+            iteration_frames.append(result.iteration_summary)
+        if not result.test_predictions.empty:
+            test_prediction_frames.append(result.test_predictions)
         for ranking_df in result.rankings:
             if ranking_df.empty or "round" not in ranking_df.columns:
                 continue
@@ -1052,11 +1077,15 @@ def run_experiment(config_path: Path) -> int:
     quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
     selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
     residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+    iteration_summary = pd.concat(iteration_frames, ignore_index=True) if iteration_frames else pd.DataFrame()
+    test_predictions = pd.concat(test_prediction_frames, ignore_index=True) if test_prediction_frames else pd.DataFrame()
     write_csv(quality_summary, output_dir / "candidate_quality_summary.csv")
     write_csv(selected_features, output_dir / "selected_features.csv")
     write_csv(residual_curve, output_dir / "residual_reduction_curve.csv")
+    write_csv(iteration_summary, output_dir / "boosting_iteration_audit.csv")
+    write_csv(test_predictions, output_dir / "boosting_test_predictions_by_iteration.csv")
     plot_residual_curve(residual_curve, output_dir)
-    round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+    round_mean_residual = iteration_residual_summary(iteration_summary, group="bad")
     write_csv(round_mean_residual, output_dir / "round_mean_residual_summary.csv")
     plot_round_residual_points(round_mean_residual, output_path=output_dir / "plots" / "round_mean_abs_residual_points.png")
 
@@ -2314,6 +2343,71 @@ def round_residual_summary(
     return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
 
 
+def iteration_residual_summary(
+    iteration_summary: pd.DataFrame,
+    *,
+    group: str = "bad",
+) -> pd.DataFrame:
+    """Convert sequential iteration metrics into one MAE point per local round.
+
+    Round 0 for each defect is its inherited state, so defect 2 starts from the
+    predictions left by defect 1 instead of returning to the base prediction.
+    """
+    if iteration_summary is None or iteration_summary.empty:
+        return pd.DataFrame()
+    required = {"global_iter", "defect_id", "round"}
+    missing = sorted(required - set(iteration_summary.columns))
+    if missing:
+        raise ValueError(f"iteration_summary is missing required columns: {missing}")
+
+    rows: list[dict[str, object]] = []
+    work = iteration_summary.sort_values("global_iter").copy()
+    for defect_id, defect_df in work.groupby("defect_id", sort=False):
+        defect_df = defect_df.sort_values("global_iter")
+        first = defect_df.iloc[0]
+        for split in ("train", "valid", "test"):
+            before_col = f"{split}_{group}_mae_before"
+            after_col = f"{split}_{group}_mae_after"
+            if before_col not in defect_df.columns or after_col not in defect_df.columns:
+                continue
+            rows.append(
+                {
+                    "defect_id": defect_id,
+                    "round": 0,
+                    "global_iter": int(first["global_iter"]) - 1,
+                    "split": split,
+                    "group": group,
+                    "selected_feature": "inherited_start",
+                    "round_selected_features": "",
+                    "n_selected_features_in_round": 0,
+                    "round_contains_answer_feature": False,
+                    "mean_abs_residual": first.get(before_col, np.nan),
+                }
+            )
+            for _, row in defect_df.iterrows():
+                selected = str(row.get("selected_features", ""))
+                selected_items = [item.strip() for item in selected.split(",") if item.strip()]
+                rows.append(
+                    {
+                        "defect_id": defect_id,
+                        "round": int(row["round"]),
+                        "global_iter": int(row["global_iter"]),
+                        "split": split,
+                        "group": group,
+                        "selected_feature": selected_items[-1] if selected_items else "",
+                        "round_selected_features": selected,
+                        "n_selected_features_in_round": len(selected_items),
+                        "round_contains_answer_feature": False,
+                        "mean_abs_residual": row.get(after_col, np.nan),
+                    }
+                )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["mean_abs_residual"] = pd.to_numeric(result["mean_abs_residual"], errors="coerce")
+    return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
+
+
 def final_metric_summary(
     final_metrics: pd.DataFrame,
     *,
@@ -2806,7 +2900,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .metrics import mae, reduction, residual_reduction_metrics, rmse
+from .metrics import mae, r2, reduction, residual_reduction_metrics, rmse
 from .modeling import fit_regressor, predict_regressor
 
 try:
@@ -2851,6 +2945,8 @@ class BoostingResult:
     residual_curve: pd.DataFrame
     rankings: list[pd.DataFrame]
     final_predictions: dict[str, np.ndarray]
+    iteration_summary: pd.DataFrame
+    test_predictions: pd.DataFrame
 
 
 @dataclass
@@ -2881,11 +2977,15 @@ class ResidualFeatureBooster:
         good_sample_ids: set[str],
         quality_summary: pd.DataFrame | None = None,
         always_rank_cols: list[str] | None = None,
+        initial_predictions: dict[str, np.ndarray] | None = None,
+        previously_selected_features: set[str] | None = None,
+        global_iter_start: int = 0,
+        base_feature_count: int = 0,
         output_dir: str | Path | None = None,
     ) -> BoostingResult:
         valid_bad_mask = valid_df[id_col].astype(str).isin(bad_sample_ids).to_numpy()
         if int(valid_bad_mask.sum()) < self.config.min_valid_bad_samples:
-            return BoostingResult(pd.DataFrame(), pd.DataFrame(), [], {})
+            return BoostingResult(pd.DataFrame(), pd.DataFrame(), [], {}, pd.DataFrame(), pd.DataFrame())
 
         y_train = train_df[target_col].to_numpy(dtype=float)
         y_valid = valid_df[target_col].to_numpy(dtype=float)
@@ -2893,14 +2993,26 @@ class ResidualFeatureBooster:
         baseline_pred_train = train_df[baseline_pred_col].to_numpy(dtype=float).copy()
         baseline_pred_valid = valid_df[baseline_pred_col].to_numpy(dtype=float).copy()
         baseline_pred_test = test_df[baseline_pred_col].to_numpy(dtype=float).copy()
-        current_pred_train = baseline_pred_train.copy()
-        current_pred_valid = baseline_pred_valid.copy()
-        current_pred_test = baseline_pred_test.copy()
+        current_pred_train, current_pred_valid, current_pred_test = _initial_predictions(
+            initial_predictions,
+            baseline_predictions={
+                "train": baseline_pred_train,
+                "valid": baseline_pred_valid,
+                "test": baseline_pred_test,
+            },
+        )
 
-        remaining = list(dict.fromkeys(candidate_cols))
+        cumulative_selected = {str(feature) for feature in (previously_selected_features or set())}
+        remaining = [
+            feature
+            for feature in dict.fromkeys(candidate_cols)
+            if str(feature) not in cumulative_selected
+        ]
         _ = always_rank_cols
         selected_records: list[dict[str, Any]] = []
         curve_records: list[dict[str, Any]] = []
+        iteration_records: list[dict[str, Any]] = []
+        test_prediction_frames: list[pd.DataFrame] = []
         rankings: list[pd.DataFrame] = []
         output_dir = Path(output_dir) if output_dir is not None else None
         if output_dir is not None:
@@ -2916,6 +3028,12 @@ class ResidualFeatureBooster:
                 break
             if not _finite(current_pred_train, current_pred_valid, current_pred_test):
                 break
+            global_iter = int(global_iter_start) + round_idx
+            pred_before_round = {
+                "train": current_pred_train.copy(),
+                "valid": current_pred_valid.copy(),
+                "test": current_pred_test.copy(),
+            }
 
             payloads = []
             ranking_features = remaining.copy()
@@ -2948,6 +3066,7 @@ class ResidualFeatureBooster:
                         good_sample_ids=good_sample_ids,
                         defect_id=defect_id,
                         round_idx=round_idx,
+                        global_iter=global_iter,
                         quality=quality_lookup.get(feature),
                     )
                 )
@@ -2958,6 +3077,9 @@ class ResidualFeatureBooster:
                         print(f"[BOOST {defect_id} round {round_idx}] {count}/{total_candidates} candidates scored ({pct:.1f}%)")
             for payload in payloads:
                 feature_name = str(payload.row.get("feature_name", ""))
+                payload.row["global_iter"] = global_iter
+                payload.row["n_base_features"] = int(base_feature_count)
+                payload.row["n_selected_before_iter"] = len(cumulative_selected)
                 payload.row["eligible_for_selection"] = feature_name in remaining_set
                 payload.row["ranking_only"] = feature_name not in remaining_set
                 payload.row["already_selected"] = feature_name not in remaining_set
@@ -2990,20 +3112,21 @@ class ResidualFeatureBooster:
             if output_dir is not None:
                 ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
 
-            if not selected_payloads:
-                break
-
             for payload in selected_payloads:
                 payload.row["ranking_metric"] = selection_metric
                 feature = str(payload.row["feature_name"])
                 current_pred_train = current_pred_train + payload.pred_train
                 current_pred_valid = current_pred_valid + payload.pred_valid
                 current_pred_test = current_pred_test + payload.pred_test
+                cumulative_selected.add(feature)
+                payload.row["n_cumulative_selected"] = len(cumulative_selected)
+                payload.row["n_effective_features"] = int(base_feature_count) + len(cumulative_selected)
                 selected_records.append(_selected_record(payload.row))
                 curve_records.append(
                     self._curve_record(
                         defect_id=defect_id,
                         round_idx=round_idx,
+                        global_iter=global_iter,
                         selected_feature=feature,
                         train_df=train_df,
                         valid_df=valid_df,
@@ -3022,11 +3145,54 @@ class ResidualFeatureBooster:
                 )
                 remaining = [candidate for candidate in remaining if candidate != feature]
 
+            iteration_records.append(
+                _iteration_record(
+                    defect_id=defect_id,
+                    round_idx=round_idx,
+                    global_iter=global_iter,
+                    selected_features=[str(payload.row["feature_name"]) for payload in selected_payloads],
+                    n_base_features=int(base_feature_count),
+                    n_selected_before=len(cumulative_selected) - len(selected_payloads),
+                    n_cumulative_selected=len(cumulative_selected),
+                    train_df=train_df,
+                    valid_df=valid_df,
+                    test_df=test_df,
+                    target_col=target_col,
+                    id_col=id_col,
+                    predictions_before=pred_before_round,
+                    predictions_after={
+                        "train": current_pred_train,
+                        "valid": current_pred_valid,
+                        "test": current_pred_test,
+                    },
+                    bad_sample_ids=bad_sample_ids,
+                )
+            )
+            test_prediction_frames.append(
+                _test_prediction_frame(
+                    test_df=test_df,
+                    target_col=target_col,
+                    id_col=id_col,
+                    defect_id=defect_id,
+                    round_idx=round_idx,
+                    global_iter=global_iter,
+                    selected_features=[str(payload.row["feature_name"]) for payload in selected_payloads],
+                    pred_before=pred_before_round["test"],
+                    pred_after=current_pred_test,
+                    bad_sample_ids=bad_sample_ids,
+                    good_sample_ids=good_sample_ids,
+                )
+            )
+            if not selected_payloads:
+                break
+
         return BoostingResult(
             selected_features=pd.DataFrame(selected_records),
             residual_curve=pd.DataFrame(curve_records),
             rankings=rankings,
             final_predictions={"train": current_pred_train, "valid": current_pred_valid, "test": current_pred_test},
+            iteration_summary=pd.DataFrame(iteration_records),
+            test_predictions=pd.concat(test_prediction_frames, ignore_index=True) if test_prediction_frames else pd.DataFrame(),
         )
 
     def _score_candidate(
@@ -3051,11 +3217,13 @@ class ResidualFeatureBooster:
         good_sample_ids: set[str],
         defect_id: str,
         round_idx: int,
+        global_iter: int,
         quality: dict[str, Any] | None,
     ) -> _ScorePayload:
         base_row = {
             "defect_id": defect_id,
             "round": round_idx,
+            "global_iter": global_iter,
             "feature_name": feature,
             "train_bad_rmse_reduction": np.nan,
             "train_bad_mae_reduction": np.nan,
@@ -3298,6 +3466,7 @@ class ResidualFeatureBooster:
         *,
         defect_id: str,
         round_idx: int,
+        global_iter: int,
         selected_feature: str,
         train_df: pd.DataFrame,
         valid_df: pd.DataFrame,
@@ -3322,6 +3491,7 @@ class ResidualFeatureBooster:
         return {
             "defect_id": defect_id,
             "round": round_idx,
+            "global_iter": global_iter,
             "selected_feature": selected_feature,
             "train_bad_rmse": rmse(y_train[train_bad], current_pred_train[train_bad]),
             "train_bad_mae": mae(y_train[train_bad], current_pred_train[train_bad]),
@@ -3342,6 +3512,118 @@ class ResidualFeatureBooster:
             "test_global_rmse": rmse(y_test, current_pred_test),
             "test_global_mae": mae(y_test, current_pred_test),
         }
+
+
+def _initial_predictions(
+    initial_predictions: dict[str, np.ndarray] | None,
+    *,
+    baseline_predictions: dict[str, np.ndarray],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    source = baseline_predictions if initial_predictions is None else initial_predictions
+    arrays: dict[str, np.ndarray] = {}
+    for split in ("train", "valid", "test"):
+        if split not in source:
+            raise ValueError(f"initial_predictions is missing split: {split!r}")
+        values = np.asarray(source[split], dtype=float).copy()
+        expected = len(baseline_predictions[split])
+        if len(values) != expected:
+            raise ValueError(
+                f"initial_predictions[{split!r}] has length {len(values)}, expected {expected}"
+            )
+        if not np.isfinite(values).all():
+            raise ValueError(f"initial_predictions[{split!r}] contains NaN or inf")
+        arrays[split] = values
+    return arrays["train"], arrays["valid"], arrays["test"]
+
+
+def _iteration_record(
+    *,
+    defect_id: str,
+    round_idx: int,
+    global_iter: int,
+    selected_features: list[str],
+    n_base_features: int,
+    n_selected_before: int,
+    n_cumulative_selected: int,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    id_col: str,
+    predictions_before: dict[str, np.ndarray],
+    predictions_after: dict[str, np.ndarray],
+    bad_sample_ids: set[str],
+) -> dict[str, Any]:
+    frames = {"train": train_df, "valid": valid_df, "test": test_df}
+    row: dict[str, Any] = {
+        "global_iter": int(global_iter),
+        "defect_id": defect_id,
+        "round": int(round_idx),
+        "selected_features": ", ".join(selected_features),
+        "n_selected_this_iter": len(selected_features),
+        "n_base_features": int(n_base_features),
+        "n_selected_before_iter": int(n_selected_before),
+        "n_cumulative_selected": int(n_cumulative_selected),
+        "n_effective_features": int(n_base_features) + int(n_cumulative_selected),
+        "iteration_status": "selected" if selected_features else "no_feature_selected",
+    }
+    for split, frame in frames.items():
+        y = frame[target_col].to_numpy(dtype=float)
+        before = predictions_before[split]
+        after = predictions_after[split]
+        bad_mask = _mask(frame, id_col, bad_sample_ids)
+        for group_name, mask in (("global", np.ones(len(frame), dtype=bool)), ("bad", bad_mask)):
+            before_mae = mae(y[mask], before[mask])
+            after_mae = mae(y[mask], after[mask])
+            before_rmse = rmse(y[mask], before[mask])
+            after_rmse = rmse(y[mask], after[mask])
+            prefix = f"{split}_{group_name}"
+            row[f"{prefix}_n_samples"] = int(mask.sum())
+            row[f"{prefix}_mae_before"] = before_mae
+            row[f"{prefix}_mae_after"] = after_mae
+            row[f"{prefix}_mae_relative_improvement"] = _safe_divide(before_mae - after_mae, before_mae)
+            row[f"{prefix}_rmse_before"] = before_rmse
+            row[f"{prefix}_rmse_after"] = after_rmse
+            row[f"{prefix}_rmse_relative_improvement"] = _safe_divide(before_rmse - after_rmse, before_rmse)
+            row[f"{prefix}_r2_before"] = r2(y[mask], before[mask])
+            row[f"{prefix}_r2_after"] = r2(y[mask], after[mask])
+    return row
+
+
+def _test_prediction_frame(
+    *,
+    test_df: pd.DataFrame,
+    target_col: str,
+    id_col: str,
+    defect_id: str,
+    round_idx: int,
+    global_iter: int,
+    selected_features: list[str],
+    pred_before: np.ndarray,
+    pred_after: np.ndarray,
+    bad_sample_ids: set[str],
+    good_sample_ids: set[str],
+) -> pd.DataFrame:
+    y = test_df[target_col].to_numpy(dtype=float)
+    ids = test_df[id_col].astype(str)
+    return pd.DataFrame(
+        {
+            "global_iter": int(global_iter),
+            "defect_id": defect_id,
+            "round": int(round_idx),
+            "selected_features": ", ".join(selected_features),
+            id_col: ids.to_numpy(),
+            "is_active_defect_bad": ids.isin(bad_sample_ids).to_numpy(),
+            "is_active_defect_good": ids.isin(good_sample_ids).to_numpy(),
+            "y_true": y,
+            "pred_before": pred_before,
+            "pred_after": pred_after,
+            "residual_before": y - pred_before,
+            "residual_after": y - pred_after,
+            "abs_residual_before": np.abs(y - pred_before),
+            "abs_residual_after": np.abs(y - pred_after),
+        }
+    )
 
 
 def _reduction_columns(
@@ -3367,9 +3649,15 @@ def _reduction_columns(
         result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
         result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
         result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
+        result[f"{prefix}_{name}_rmse_reduction_over_before"] = _safe_divide(
+            values["rmse_reduction"], values["rmse_before"]
+        )
         result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
         result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
         result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
+        result[f"{prefix}_{name}_mae_reduction_over_before"] = _safe_divide(
+            values["mae_reduction"], values["mae_before"]
+        )
         result[f"{prefix}_{name}_rmse_baseline"] = baseline_rmse
         result[f"{prefix}_{name}_rmse_after_over_baseline"] = _safe_divide(values["rmse_after"], baseline_rmse)
         result[f"{prefix}_{name}_rmse_reduction_from_baseline"] = reduction(baseline_rmse, values["rmse_after"])
@@ -3474,24 +3762,32 @@ def _empty_baseline_ratio_columns() -> dict[str, float]:
 
 def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
     keys = [
+        "global_iter",
         "defect_id",
         "round",
         "feature_name",
         "ranking_metric",
+        "n_base_features",
+        "n_selected_before_iter",
+        "n_cumulative_selected",
+        "n_effective_features",
         "train_bad_rmse_baseline",
         "train_bad_rmse_before",
         "train_bad_rmse_after",
         "train_bad_rmse_reduction",
+        "train_bad_rmse_reduction_over_before",
         "train_bad_rmse_after_over_baseline",
         "valid_bad_rmse_baseline",
         "valid_bad_rmse_before",
         "valid_bad_rmse_after",
         "valid_bad_rmse_reduction",
+        "valid_bad_rmse_reduction_over_before",
         "valid_bad_rmse_after_over_baseline",
         "valid_bad_rmse_reduction_from_baseline_pct",
         "test_bad_rmse_before",
         "test_bad_rmse_after",
         "test_bad_rmse_reduction",
+        "test_bad_rmse_reduction_over_before",
         "test_bad_rmse_after_over_baseline",
         "valid_good_rmse_reduction",
         "test_good_rmse_reduction",
@@ -3508,16 +3804,19 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "train_bad_mae_before",
         "train_bad_mae_after",
         "train_bad_mae_reduction",
+        "train_bad_mae_reduction_over_before",
         "train_bad_mae_after_over_baseline",
         "valid_bad_mae_baseline",
         "valid_bad_mae_before",
         "valid_bad_mae_after",
         "valid_bad_mae_reduction",
+        "valid_bad_mae_reduction_over_before",
         "valid_bad_mae_after_over_baseline",
         "valid_bad_mae_reduction_from_baseline_pct",
         "test_bad_mae_before",
         "test_bad_mae_after",
         "test_bad_mae_reduction",
+        "test_bad_mae_reduction_over_before",
         "test_bad_mae_after_over_baseline",
         "valid_good_mae_reduction",
         "test_good_mae_reduction",
@@ -4329,7 +4628,7 @@ import unittest
 
 import pandas as pd
 
-from feature_boosting.reporting import final_metric_summary, round_residual_summary
+from feature_boosting.reporting import final_metric_summary, iteration_residual_summary, round_residual_summary
 
 
 class ReportingTests(unittest.TestCase):
@@ -4415,6 +4714,38 @@ class ReportingTests(unittest.TestCase):
         self.assertAlmostEqual(float(row["mae_reduction"]), 1.0)
         self.assertAlmostEqual(float(row["mae_reduction_pct"]), 25.0)
         self.assertAlmostEqual(float(row["r2_delta"]), 0.15)
+
+    def test_iteration_residual_summary_uses_inherited_defect_start(self) -> None:
+        iterations = pd.DataFrame(
+            [
+                {
+                    "global_iter": 1,
+                    "defect_id": "defect_1",
+                    "round": 1,
+                    "selected_features": "feature_a",
+                    "valid_bad_mae_before": 10.0,
+                    "valid_bad_mae_after": 8.0,
+                },
+                {
+                    "global_iter": 2,
+                    "defect_id": "defect_2",
+                    "round": 1,
+                    "selected_features": "feature_b",
+                    "valid_bad_mae_before": 7.0,
+                    "valid_bad_mae_after": 5.0,
+                },
+            ]
+        )
+
+        summary = iteration_residual_summary(iterations, group="bad")
+        defect_2 = summary[
+            (summary["defect_id"].astype(str) == "defect_2")
+            & (summary["split"].astype(str) == "valid")
+        ].reset_index(drop=True)
+
+        self.assertEqual(defect_2["round"].tolist(), [0, 1])
+        self.assertEqual(defect_2["global_iter"].tolist(), [1, 2])
+        self.assertEqual(defect_2["mean_abs_residual"].tolist(), [7.0, 5.0])
 
 
 if __name__ == "__main__":
@@ -4684,6 +5015,65 @@ class ResidualBoostingTests(unittest.TestCase):
         )
         self.assertTrue(result.selected_features.empty)
 
+    def test_sequential_defects_carry_predictions_and_exclude_selected_features(self) -> None:
+        df = _sequential_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        all_ids = set(df["sample_id"])
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                overfit_guard_enabled=False,
+                show_progress=False,
+            )
+        )
+
+        first = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden_1"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=all_ids,
+            good_sample_ids=set(),
+            global_iter_start=0,
+            base_feature_count=2,
+        )
+        selected_first = set(first.selected_features["feature_name"].astype(str))
+        second = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden_1", "hidden_2"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_2",
+            bad_sample_ids=all_ids,
+            good_sample_ids=set(),
+            initial_predictions=first.final_predictions,
+            previously_selected_features=selected_first,
+            global_iter_start=len(first.rankings),
+            base_feature_count=2,
+        )
+
+        self.assertEqual(first.iteration_summary["global_iter"].tolist(), [1])
+        self.assertEqual(second.iteration_summary["global_iter"].tolist(), [2])
+        self.assertNotIn("hidden_1", second.rankings[0]["feature_name"].astype(str).tolist())
+        self.assertEqual(second.selected_features["feature_name"].tolist(), ["hidden_2"])
+        first_valid_after = float(first.iteration_summary.loc[0, "valid_global_rmse_after"])
+        second_valid_before = float(second.iteration_summary.loc[0, "valid_global_rmse_before"])
+        self.assertAlmostEqual(first_valid_after, second_valid_before)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_cumulative_selected"]), 2)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 4)
+        self.assertEqual(sorted(second.test_predictions["global_iter"].unique().tolist()), [2])
+        self.assertIn("valid_bad_rmse_reduction_over_before", second.rankings[0].columns)
+
 
 def _synthetic_frame() -> pd.DataFrame:
     rng = np.random.default_rng(7)
@@ -4723,6 +5113,24 @@ def _overfit_frame() -> pd.DataFrame:
             "yield": y,
             "baseline_pred": np.zeros(n),
             "train_only_signal": signal,
+        }
+    )
+
+
+def _sequential_frame() -> pd.DataFrame:
+    rng = np.random.default_rng(77)
+    n = 120
+    hidden_1 = rng.normal(0, 1, n)
+    hidden_2 = rng.normal(0, 1, n)
+    baseline = np.linspace(40, 50, n)
+    return pd.DataFrame(
+        {
+            "sample_id": [f"WF_SEQ_{idx:04d}" for idx in range(n)],
+            "split": np.array(["train"] * 70 + ["valid"] * 25 + ["test"] * 25),
+            "yield": baseline + 4.0 * hidden_1 + 2.0 * hidden_2,
+            "baseline_pred": baseline,
+            "hidden_1": hidden_1,
+            "hidden_2": hidden_2,
         }
     )
 
@@ -4877,7 +5285,7 @@ from feature_boosting.answer_features import add_answer_feature_flags, answer_fe
 from feature_boosting.baseline_model import add_baseline_predictions, metrics_by_split, train_baseline_model
 from feature_boosting.data_loader import align_base_and_candidates, candidate_feature_cols, load_base_dataset, load_base_feature_cols, load_candidate_features, load_group_ids, standardize_six_file_inputs
 from feature_boosting.final_model import evaluate_model_by_groups, predict_final, train_final_model
-from feature_boosting.reporting import baseline_residual_summary, final_metric_summary, plot_candidate_loss_ranking, plot_final_feature_set_summary, plot_final_metric_comparison, plot_residual_curve, plot_round_residual_points, prepare_output_dir, round_residual_summary, write_csv
+from feature_boosting.reporting import baseline_residual_summary, final_metric_summary, iteration_residual_summary, plot_candidate_loss_ranking, plot_final_feature_set_summary, plot_final_metric_comparison, plot_residual_curve, plot_round_residual_points, prepare_output_dir, round_residual_summary, write_csv
 from feature_boosting.residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
 from feature_boosting.overfit import recommend_overfit_safe_settings
 from feature_boosting.shap_analysis import compute_shap_summary
@@ -5437,6 +5845,19 @@ booster = ResidualFeatureBooster(
 quality_frames = []
 selected_frames = []
 curve_frames = []
+ranking_audit_frames = []
+iteration_audit_frames = []
+test_prediction_frames = []
+
+# One continuous boosting chain: defect_1 -> defect_2 -> defect_3.
+sequential_predictions = {
+    "train": train_df["baseline_pred"].to_numpy(dtype=float).copy(),
+    "valid": valid_df["baseline_pred"].to_numpy(dtype=float).copy(),
+    "test": test_df["baseline_pred"].to_numpy(dtype=float).copy(),
+}
+global_selected_features = set()
+global_iter_offset = 0
+defect_initial_predictions = {}
 
 for defect in DEFECTS:
     defect_id = defect["defect_id"]
@@ -5467,7 +5888,14 @@ for defect in DEFECTS:
     if answer_rules and not answer_tracking_cols:
         print(f"[WARN {defect_id}] ANSWER_FEATURES did not match any candidate column. Check names/rules: {answer_rules}")
 
-    print(f"[{defect_id}] scoring {len(candidate_cols)} candidates")
+    n_available = sum(str(feature) not in global_selected_features for feature in candidate_cols)
+    print(
+        f"[{defect_id}] scoring {n_available}/{len(candidate_cols)} candidates; "
+        f"inherited selected={len(global_selected_features)}, next global_iter={global_iter_offset + 1}"
+    )
+    defect_initial_predictions[defect_id] = {
+        split: values.copy() for split, values in sequential_predictions.items()
+    }
     result = booster.run_for_defect(
         train_df=train_df,
         valid_df=valid_df,
@@ -5480,14 +5908,30 @@ for defect in DEFECTS:
         bad_sample_ids=groups["bad"],
         good_sample_ids=groups["good"],
         quality_summary=quality,
+        initial_predictions=sequential_predictions,
+        previously_selected_features=global_selected_features,
+        global_iter_start=global_iter_offset,
+        base_feature_count=len(base_feature_cols),
         output_dir=OUT_DIR / "rankings",
     )
+
+    # Carry the corrected prediction/residual and selected features into the next defect.
+    if result.final_predictions:
+        sequential_predictions = {split: values.copy() for split, values in result.final_predictions.items()}
+    if not result.selected_features.empty:
+        global_selected_features.update(result.selected_features["feature_name"].dropna().astype(str))
+    global_iter_offset += len(result.rankings)
+    if not result.iteration_summary.empty:
+        iteration_audit_frames.append(result.iteration_summary)
+    if not result.test_predictions.empty:
+        test_prediction_frames.append(result.test_predictions)
 
     if result.rankings:
         for ranking_df in result.rankings:
             if ranking_df.empty or "round" not in ranking_df.columns:
                 continue
             ranking_df = add_answer_feature_flags(ranking_df, feature_col="feature_name", rules=answer_rules)
+            ranking_audit_frames.append(ranking_df.copy())
             round_no = int(ranking_df["round"].max())
             answer_mask = ranking_df["is_answer_feature"].fillna(False).astype(bool) if "is_answer_feature" in ranking_df.columns else pd.Series(False, index=ranking_df.index)
             answer_rows = ranking_df[answer_mask].copy()
@@ -5529,10 +5973,16 @@ for defect in DEFECTS:
 quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
 selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
 residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+boosting_feature_audit = pd.concat(ranking_audit_frames, ignore_index=True) if ranking_audit_frames else pd.DataFrame()
+boosting_iteration_audit = pd.concat(iteration_audit_frames, ignore_index=True) if iteration_audit_frames else pd.DataFrame()
+boosting_test_predictions = pd.concat(test_prediction_frames, ignore_index=True) if test_prediction_frames else pd.DataFrame()
 
 write_csv(quality_summary, OUT_DIR / "candidate_quality_summary.csv")
 write_csv(selected_features, OUT_DIR / "selected_features.csv")
 write_csv(residual_curve, OUT_DIR / "residual_reduction_curve.csv")
+write_csv(boosting_feature_audit, OUT_DIR / "boosting_feature_metric_audit.csv")
+write_csv(boosting_iteration_audit, OUT_DIR / "boosting_iteration_audit.csv")
+write_csv(boosting_test_predictions, OUT_DIR / "boosting_test_predictions_by_iteration.csv")
 plot_residual_curve(
     residual_curve,
     OUT_DIR,
@@ -5540,7 +5990,7 @@ plot_residual_curve(
     metric_name=EXPERIMENT_METRIC_LOWER,
 )
 
-round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+round_mean_residual = iteration_residual_summary(boosting_iteration_audit, group="bad")
 write_csv(round_mean_residual, OUT_DIR / "round_mean_residual_summary.csv")
 fig = plot_round_residual_points(
     round_mean_residual,
@@ -5554,6 +6004,12 @@ if fig is not None:
 
 display(selected_features)
 display(residual_curve)
+display(boosting_iteration_audit)
+if not boosting_feature_audit.empty:
+    highlight_mask = boosting_feature_audit["selected"].fillna(False).astype(bool)
+    if "is_answer_feature" in boosting_feature_audit.columns:
+        highlight_mask |= boosting_feature_audit["is_answer_feature"].fillna(False).astype(bool)
+    display(boosting_feature_audit[highlight_mask])
 
 standard_elapsed_seconds = time.perf_counter() - standard_experiment_start_time
 standard_runtime_summary = pd.DataFrame(
@@ -5709,6 +6165,13 @@ if NULL_BENCHMARK_ENABLED:
     null_competition_ranking_frames = []
     null_competition_selected_frames = []
     null_competition_curve_frames = []
+    null_sequential_predictions = {
+        "train": null_train_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "valid": null_valid_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "test": null_test_df["baseline_pred"].to_numpy(dtype=float).copy(),
+    }
+    null_global_selected_features = set()
+    null_global_iter_offset = 0
 
     for defect in DEFECTS:
         defect_id = str(defect["defect_id"])
@@ -5738,8 +6201,19 @@ if NULL_BENCHMARK_ENABLED:
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
             quality_summary=null_quality,
+            initial_predictions=null_sequential_predictions,
+            previously_selected_features=null_global_selected_features,
+            global_iter_start=null_global_iter_offset,
+            base_feature_count=len(base_feature_cols),
             output_dir=NULL_BENCHMARK_DIR / "competition_rankings",
         )
+        if result.final_predictions:
+            null_sequential_predictions = {
+                split: values.copy() for split, values in result.final_predictions.items()
+            }
+        if not result.selected_features.empty:
+            null_global_selected_features.update(result.selected_features["feature_name"].dropna().astype(str))
+        null_global_iter_offset += len(result.rankings)
 
         if not result.selected_features.empty:
             selected = result.selected_features.copy()
@@ -5988,8 +6462,6 @@ if METRIC_CHECK_ENABLED:
     y_valid_check = valid_df[TARGET_COL].to_numpy(dtype=float)
     baseline_train_check = train_df["baseline_pred"].to_numpy(dtype=float)
     baseline_valid_check = valid_df["baseline_pred"].to_numpy(dtype=float)
-    residual_train_check = y_train_check - baseline_train_check
-    residual_valid_check = y_valid_check - baseline_valid_check
 
     for defect in DEFECTS:
         defect_id = str(defect["defect_id"])
@@ -6002,14 +6474,23 @@ if METRIC_CHECK_ENABLED:
         if representatives.empty:
             print(f"[{defect_id}] metric check skipped: no valid ranking rows")
             continue
+        if defect_id not in defect_initial_predictions:
+            print(f"[{defect_id}] metric check skipped: inherited start prediction not found")
+            continue
+
+        inherited_start = defect_initial_predictions[defect_id]
+        current_train_check = inherited_start["train"]
+        current_valid_check = inherited_start["valid"]
+        residual_train_check = y_train_check - current_train_check
+        residual_valid_check = y_valid_check - current_valid_check
 
         bad_mask = valid_df[ID_COL].astype(str).isin(defect_groups[defect_id]["bad"]).to_numpy()
         if not bad_mask.any():
             print(f"[{defect_id}] metric check skipped: no validation bad samples")
             continue
 
-        bad_before = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
-        global_before = METRIC_CHECK_FUNCTION(y_valid_check, baseline_valid_check)
+        bad_baseline = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
+        global_baseline = METRIC_CHECK_FUNCTION(y_valid_check, baseline_valid_check)
 
         for _, ranking_row in representatives.iterrows():
             feature_name = str(ranking_row["feature_name"])
@@ -6018,12 +6499,12 @@ if METRIC_CHECK_ENABLED:
                 [feature_name], RESIDUAL_MODEL_PARAMS,
             )
             correction = predict_regressor(model, valid_df, [feature_name])
-            pred_after = baseline_valid_check + correction
+            pred_after = current_valid_check + correction
 
             direct_bad_after = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], pred_after[bad_mask])
-            direct_bad_ratio = direct_bad_after / bad_before
+            direct_bad_ratio = direct_bad_after / bad_baseline
             direct_global_after = METRIC_CHECK_FUNCTION(y_valid_check, pred_after)
-            direct_global_ratio = direct_global_after / global_before
+            direct_global_ratio = direct_global_after / global_baseline
             stored_bad_after = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after"])
             stored_bad_ratio = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after_over_baseline"])
             stored_global_after = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_after"])
@@ -6037,6 +6518,7 @@ if METRIC_CHECK_ENABLED:
             ]
             metric_check_rows.append({
                 "defect_id": defect_id,
+                "global_iter": int(ranking_row.get("global_iter", 0)),
                 "round": METRIC_CHECK_ROUND,
                 "check_position": ranking_row["check_position"],
                 "feature_name": feature_name,

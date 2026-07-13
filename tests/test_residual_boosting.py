@@ -258,6 +258,65 @@ class ResidualBoostingTests(unittest.TestCase):
         )
         self.assertTrue(result.selected_features.empty)
 
+    def test_sequential_defects_carry_predictions_and_exclude_selected_features(self) -> None:
+        df = _sequential_frame()
+        train_df = df[df["split"] == "train"].copy()
+        valid_df = df[df["split"] == "valid"].copy()
+        test_df = df[df["split"] == "test"].copy()
+        all_ids = set(df["sample_id"])
+        booster = ResidualFeatureBooster(
+            ResidualFeatureBoosterConfig(
+                residual_model_params={"backend": "numpy"},
+                n_rounds=1,
+                overfit_guard_enabled=False,
+                show_progress=False,
+            )
+        )
+
+        first = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden_1"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_1",
+            bad_sample_ids=all_ids,
+            good_sample_ids=set(),
+            global_iter_start=0,
+            base_feature_count=2,
+        )
+        selected_first = set(first.selected_features["feature_name"].astype(str))
+        second = booster.run_for_defect(
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+            candidate_cols=["hidden_1", "hidden_2"],
+            target_col="yield",
+            id_col="sample_id",
+            baseline_pred_col="baseline_pred",
+            defect_id="defect_2",
+            bad_sample_ids=all_ids,
+            good_sample_ids=set(),
+            initial_predictions=first.final_predictions,
+            previously_selected_features=selected_first,
+            global_iter_start=len(first.rankings),
+            base_feature_count=2,
+        )
+
+        self.assertEqual(first.iteration_summary["global_iter"].tolist(), [1])
+        self.assertEqual(second.iteration_summary["global_iter"].tolist(), [2])
+        self.assertNotIn("hidden_1", second.rankings[0]["feature_name"].astype(str).tolist())
+        self.assertEqual(second.selected_features["feature_name"].tolist(), ["hidden_2"])
+        first_valid_after = float(first.iteration_summary.loc[0, "valid_global_rmse_after"])
+        second_valid_before = float(second.iteration_summary.loc[0, "valid_global_rmse_before"])
+        self.assertAlmostEqual(first_valid_after, second_valid_before)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_cumulative_selected"]), 2)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 4)
+        self.assertEqual(sorted(second.test_predictions["global_iter"].unique().tolist()), [2])
+        self.assertIn("valid_bad_rmse_reduction_over_before", second.rankings[0].columns)
+
 
 def _synthetic_frame() -> pd.DataFrame:
     rng = np.random.default_rng(7)
@@ -297,6 +356,24 @@ def _overfit_frame() -> pd.DataFrame:
             "yield": y,
             "baseline_pred": np.zeros(n),
             "train_only_signal": signal,
+        }
+    )
+
+
+def _sequential_frame() -> pd.DataFrame:
+    rng = np.random.default_rng(77)
+    n = 120
+    hidden_1 = rng.normal(0, 1, n)
+    hidden_2 = rng.normal(0, 1, n)
+    baseline = np.linspace(40, 50, n)
+    return pd.DataFrame(
+        {
+            "sample_id": [f"WF_SEQ_{idx:04d}" for idx in range(n)],
+            "split": np.array(["train"] * 70 + ["valid"] * 25 + ["test"] * 25),
+            "yield": baseline + 4.0 * hidden_1 + 2.0 * hidden_2,
+            "baseline_pred": baseline,
+            "hidden_1": hidden_1,
+            "hidden_2": hidden_2,
         }
     )
 

@@ -214,6 +214,71 @@ def round_residual_summary(
     return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
 
 
+def iteration_residual_summary(
+    iteration_summary: pd.DataFrame,
+    *,
+    group: str = "bad",
+) -> pd.DataFrame:
+    """Convert sequential iteration metrics into one MAE point per local round.
+
+    Round 0 for each defect is its inherited state, so defect 2 starts from the
+    predictions left by defect 1 instead of returning to the base prediction.
+    """
+    if iteration_summary is None or iteration_summary.empty:
+        return pd.DataFrame()
+    required = {"global_iter", "defect_id", "round"}
+    missing = sorted(required - set(iteration_summary.columns))
+    if missing:
+        raise ValueError(f"iteration_summary is missing required columns: {missing}")
+
+    rows: list[dict[str, object]] = []
+    work = iteration_summary.sort_values("global_iter").copy()
+    for defect_id, defect_df in work.groupby("defect_id", sort=False):
+        defect_df = defect_df.sort_values("global_iter")
+        first = defect_df.iloc[0]
+        for split in ("train", "valid", "test"):
+            before_col = f"{split}_{group}_mae_before"
+            after_col = f"{split}_{group}_mae_after"
+            if before_col not in defect_df.columns or after_col not in defect_df.columns:
+                continue
+            rows.append(
+                {
+                    "defect_id": defect_id,
+                    "round": 0,
+                    "global_iter": int(first["global_iter"]) - 1,
+                    "split": split,
+                    "group": group,
+                    "selected_feature": "inherited_start",
+                    "round_selected_features": "",
+                    "n_selected_features_in_round": 0,
+                    "round_contains_answer_feature": False,
+                    "mean_abs_residual": first.get(before_col, np.nan),
+                }
+            )
+            for _, row in defect_df.iterrows():
+                selected = str(row.get("selected_features", ""))
+                selected_items = [item.strip() for item in selected.split(",") if item.strip()]
+                rows.append(
+                    {
+                        "defect_id": defect_id,
+                        "round": int(row["round"]),
+                        "global_iter": int(row["global_iter"]),
+                        "split": split,
+                        "group": group,
+                        "selected_feature": selected_items[-1] if selected_items else "",
+                        "round_selected_features": selected,
+                        "n_selected_features_in_round": len(selected_items),
+                        "round_contains_answer_feature": False,
+                        "mean_abs_residual": row.get(after_col, np.nan),
+                    }
+                )
+    result = pd.DataFrame(rows)
+    if result.empty:
+        return result
+    result["mean_abs_residual"] = pd.to_numeric(result["mean_abs_residual"], errors="coerce")
+    return result.sort_values(["defect_id", "split", "round"]).reset_index(drop=True)
+
+
 def final_metric_summary(
     final_metrics: pd.DataFrame,
     *,

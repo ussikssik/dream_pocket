@@ -20,13 +20,13 @@ from .reporting import (
     baseline_residual_summary,
     copy_config,
     final_metric_summary,
+    iteration_residual_summary,
     plot_candidate_loss_ranking,
     plot_final_feature_set_summary,
     plot_final_metric_comparison,
     plot_residual_curve,
     plot_round_residual_points,
     prepare_output_dir,
-    round_residual_summary,
     setup_logger,
     write_csv,
 )
@@ -120,6 +120,8 @@ def run_experiment(config_path: Path) -> int:
     quality_frames: list[pd.DataFrame] = []
     selected_frames: list[pd.DataFrame] = []
     curve_frames: list[pd.DataFrame] = []
+    iteration_frames: list[pd.DataFrame] = []
+    test_prediction_frames: list[pd.DataFrame] = []
     booster = ResidualFeatureBooster(
         ResidualFeatureBoosterConfig(
             residual_model_params=config.residual_model,
@@ -145,6 +147,14 @@ def run_experiment(config_path: Path) -> int:
             progress_every=config.boosting.progress_every,
         )
     )
+
+    sequential_predictions = {
+        "train": train_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "valid": valid_df["baseline_pred"].to_numpy(dtype=float).copy(),
+        "test": test_df["baseline_pred"].to_numpy(dtype=float).copy(),
+    }
+    global_selected_features: set[str] = set()
+    global_iter_offset = 0
 
     for defect in config.defects:
         groups = defect_groups[defect.defect_id]
@@ -176,8 +186,23 @@ def run_experiment(config_path: Path) -> int:
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
             quality_summary=quality,
+            initial_predictions=sequential_predictions,
+            previously_selected_features=global_selected_features,
+            global_iter_start=global_iter_offset,
+            base_feature_count=len(base_feature_cols),
             output_dir=output_dir / "rankings",
         )
+        if result.final_predictions:
+            sequential_predictions = {
+                split: values.copy() for split, values in result.final_predictions.items()
+            }
+        if not result.selected_features.empty:
+            global_selected_features.update(result.selected_features["feature_name"].dropna().astype(str))
+        global_iter_offset += len(result.rankings)
+        if not result.iteration_summary.empty:
+            iteration_frames.append(result.iteration_summary)
+        if not result.test_predictions.empty:
+            test_prediction_frames.append(result.test_predictions)
         for ranking_df in result.rankings:
             if ranking_df.empty or "round" not in ranking_df.columns:
                 continue
@@ -205,11 +230,15 @@ def run_experiment(config_path: Path) -> int:
     quality_summary = pd.concat(quality_frames, ignore_index=True) if quality_frames else pd.DataFrame()
     selected_features = pd.concat(selected_frames, ignore_index=True) if selected_frames else pd.DataFrame()
     residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else pd.DataFrame()
+    iteration_summary = pd.concat(iteration_frames, ignore_index=True) if iteration_frames else pd.DataFrame()
+    test_predictions = pd.concat(test_prediction_frames, ignore_index=True) if test_prediction_frames else pd.DataFrame()
     write_csv(quality_summary, output_dir / "candidate_quality_summary.csv")
     write_csv(selected_features, output_dir / "selected_features.csv")
     write_csv(residual_curve, output_dir / "residual_reduction_curve.csv")
+    write_csv(iteration_summary, output_dir / "boosting_iteration_audit.csv")
+    write_csv(test_predictions, output_dir / "boosting_test_predictions_by_iteration.csv")
     plot_residual_curve(residual_curve, output_dir)
-    round_mean_residual = round_residual_summary(residual_curve, baseline_summary, group="bad")
+    round_mean_residual = iteration_residual_summary(iteration_summary, group="bad")
     write_csv(round_mean_residual, output_dir / "round_mean_residual_summary.csv")
     plot_round_residual_points(round_mean_residual, output_path=output_dir / "plots" / "round_mean_abs_residual_points.png")
 
