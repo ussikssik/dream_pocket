@@ -24,7 +24,7 @@ class ResidualFeatureBoosterConfig:
     residual_model_params: dict[str, Any]
     n_rounds: int = 5
     select_per_round: int = 1
-    main_metric: str = "valid_bad_rmse_reduction"
+    main_metric: str = "valid_bad_rmse_reduction_over_before"
     min_improvement: float = 0.0
     selection_mode: str = "top_k"
     selection_metric: str | None = None
@@ -860,6 +860,7 @@ def _empty_baseline_ratio_columns() -> dict[str, float]:
     for prefix in ("train", "valid", "test"):
         for group in ("bad", "good", "global"):
             for metric in ("rmse", "mae"):
+                result[f"{prefix}_{group}_{metric}_reduction_over_before"] = np.nan
                 result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
                 result[f"{prefix}_{group}_{metric}_after_over_baseline"] = np.nan
                 result[f"{prefix}_{group}_{metric}_reduction_from_baseline"] = np.nan

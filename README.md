@@ -37,12 +37,12 @@ Boosting 단계에서 round별 feature 선택 방식도 노트북 설정 셀에�
 # rank 기준으로 round마다 상위 20개 선택
 BOOSTING_SELECTION_MODE = "top_k"
 SELECT_PER_ROUND = 20
-BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction_over_before"
 
-# after residual / baseline residual 비율이 0.3 이하인 feature 선택
+# 직전 residual RMSE보다 20% 이상 개선되는 feature 선택
 BOOSTING_SELECTION_MODE = "threshold"
-BOOSTING_SELECTION_METRIC = "bad_rmse_after_over_baseline"
-BOOSTING_SELECTION_THRESHOLD = 0.3
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction_over_before"
+BOOSTING_SELECTION_THRESHOLD = 0.2
 BOOSTING_MAX_SELECT_PER_ROUND = None
 ```
 

@@ -44,8 +44,13 @@ class ResidualBoostingTests(unittest.TestCase):
         ranking = result.rankings[0].set_index("feature_name")
         self.assertIn("valid_bad_rmse_after_over_baseline", ranking.columns)
         self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
+        before = float(ranking.loc["hidden", "valid_bad_rmse_before"])
+        after = float(ranking.loc["hidden", "valid_bad_rmse_after"])
+        relative_improvement = float(ranking.loc["hidden", "valid_bad_rmse_reduction_over_before"])
+        self.assertAlmostEqual(relative_improvement, (before - after) / before)
+        self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_reduction_over_before")
 
-    def test_threshold_mode_selects_by_residual_ratio(self) -> None:
+    def test_threshold_mode_selects_by_relative_improvement(self) -> None:
         df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
         valid_df = df[df["split"] == "valid"].copy()
@@ -58,8 +63,8 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy"},
                 n_rounds=1,
                 selection_mode="threshold",
-                selection_metric="bad_rmse_after_over_baseline",
-                selection_threshold=0.25,
+                selection_metric="bad_rmse_reduction_over_before",
+                selection_threshold=0.5,
                 max_select_per_round=None,
                 show_progress=False,
             )

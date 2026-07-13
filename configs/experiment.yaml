@@ -50,10 +50,10 @@ feature_filter:
 boosting:
   n_rounds: 5
   select_per_round: 1
-  main_metric: "bad_rmse_reduction"
+  main_metric: "bad_rmse_reduction_over_before"
   min_improvement: 0.0
   selection_mode: "top_k"
-  selection_metric: "bad_rmse_reduction"
+  selection_metric: "bad_rmse_reduction_over_before"
   selection_threshold:
   selection_direction: "auto"
   max_select_per_round:

@@ -210,8 +210,8 @@ def run_experiment(config_path: Path) -> int:
             plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_after_over_baseline",
-                bad_metric_col="valid_bad_rmse_after_over_baseline",
+                global_metric_col="valid_global_rmse_reduction_over_before",
+                bad_metric_col="valid_bad_rmse_reduction_over_before",
                 title_prefix=f"{defect.defect_id} round {round_no}",
             )
         if not result.selected_features.empty:

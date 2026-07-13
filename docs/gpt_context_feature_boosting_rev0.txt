@@ -78,12 +78,12 @@ Boosting 단계에서 round별 feature 선택 방식도 노트북 설정 셀에�
 # rank 기준으로 round마다 상위 20개 선택
 BOOSTING_SELECTION_MODE = "top_k"
 SELECT_PER_ROUND = 20
-BOOSTING_SELECTION_METRIC = "bad_rmse_reduction"
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction_over_before"
 
-# after residual / baseline residual 비율이 0.3 이하인 feature 선택
+# 직전 residual RMSE보다 20% 이상 개선되는 feature 선택
 BOOSTING_SELECTION_MODE = "threshold"
-BOOSTING_SELECTION_METRIC = "bad_rmse_after_over_baseline"
-BOOSTING_SELECTION_THRESHOLD = 0.3
+BOOSTING_SELECTION_METRIC = "bad_rmse_reduction_over_before"
+BOOSTING_SELECTION_THRESHOLD = 0.2
 BOOSTING_MAX_SELECT_PER_ROUND = None
 ```
 
@@ -602,10 +602,10 @@ feature_filter:
 boosting:
   n_rounds: 5
   select_per_round: 1
-  main_metric: "bad_rmse_reduction"
+  main_metric: "bad_rmse_reduction_over_before"
   min_improvement: 0.0
   selection_mode: "top_k"
-  selection_metric: "bad_rmse_reduction"
+  selection_metric: "bad_rmse_reduction_over_before"
   selection_threshold:
   selection_direction: "auto"
   max_select_per_round:
@@ -1057,8 +1057,8 @@ def run_experiment(config_path: Path) -> int:
             plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_after_over_baseline",
-                bad_metric_col="valid_bad_rmse_after_over_baseline",
+                global_metric_col="valid_global_rmse_reduction_over_before",
+                bad_metric_col="valid_bad_rmse_reduction_over_before",
                 title_prefix=f"{defect.defect_id} round {round_no}",
             )
         if not result.selected_features.empty:
@@ -1230,7 +1230,7 @@ class FeatureFilterConfig:
 class BoostingConfig:
     n_rounds: int = 5
     select_per_round: int = 1
-    main_metric: str = "valid_bad_rmse_reduction"
+    main_metric: str = "valid_bad_rmse_reduction_over_before"
     min_improvement: float = 0.0
     selection_mode: str = "top_k"
     selection_metric: str | None = None
@@ -2621,20 +2621,15 @@ def plot_candidate_loss_ranking(
     ranking_df: pd.DataFrame,
     *,
     output_path: str | Path | None = None,
-    global_metric_col: str = "valid_global_rmse_after_over_baseline",
-    bad_metric_col: str = "valid_bad_rmse_after_over_baseline",
+    global_metric_col: str = "valid_global_rmse_reduction_over_before",
+    bad_metric_col: str = "valid_bad_rmse_reduction_over_before",
     selected_col: str = "selected",
     answer_features: Any = None,
     answer_col: str = "is_answer_feature",
     null_col: str = "is_null_feature",
     title_prefix: str = "candidate loss after residual boost",
 ):
-    """Plot candidate rank vs after-boosting loss for global and bad groups.
-
-    The x-axis is rank after sorting each metric in ascending order, so lower
-    points on the left are better. This mirrors the manual fb_metric plots:
-    each dot is one candidate feature, and selected features are highlighted.
-    """
+    """Plot candidate rank against its configured residual-improvement metric."""
     if ranking_df.empty:
         return None
     try:
@@ -2681,7 +2676,11 @@ def _plot_loss_axis(
     answer_rows_all = source[source_answer_mask].copy()
 
     work = source.dropna(subset=[metric_col]).copy()
-    work = work.dropna(subset=[metric_col]).sort_values([metric_col, "feature_name"]).reset_index(drop=True)
+    higher_is_better = _ranking_metric_higher_is_better(metric_col)
+    work = work.sort_values(
+        [metric_col, "feature_name"],
+        ascending=[not higher_is_better, True],
+    ).reset_index(drop=True)
     if work.empty:
         ax.set_title(title)
         ax.text(0.5, 0.5, "no finite metric values", ha="center", va="center", transform=ax.transAxes)
@@ -2692,6 +2691,8 @@ def _plot_loss_axis(
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
     if "over_baseline" in metric_col:
         ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
+    elif "reduction_over_before" in metric_col or "relative_improvement" in metric_col:
+        ax.axhline(0.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="no improvement = 0.0")
 
     if null_col in work.columns:
         null_features = work[work[null_col].fillna(False).astype(bool)]
@@ -2795,8 +2796,13 @@ def _plot_loss_axis(
         )
 
     ax.set_title(title)
-    ax.set_xlabel("feature rank (ascending loss)")
-    ylabel = "after residual / baseline residual" if "over_baseline" in metric_col else metric_col
+    ax.set_xlabel("feature rank (best to worst)")
+    if "reduction_over_before" in metric_col or "relative_improvement" in metric_col:
+        ylabel = "(previous loss - after loss) / previous loss"
+    elif "over_baseline" in metric_col:
+        ylabel = "after residual / baseline residual"
+    else:
+        ylabel = metric_col
     ax.set_ylabel(ylabel)
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8)
@@ -2808,6 +2814,15 @@ def _answer_rank_x(row: pd.Series, *, fallback: int) -> int:
     except (TypeError, ValueError):
         return int(fallback)
     return value if value > 0 else int(fallback)
+
+
+def _ranking_metric_higher_is_better(metric_col: str) -> bool:
+    metric = str(metric_col).lower()
+    if "reduction" in metric or "improvement" in metric:
+        return True
+    if "over_baseline" in metric or metric.endswith("_after") or metric.endswith("_loss"):
+        return False
+    return True
 
 
 def _plot_final_metric_axis(ax, split_df: pd.DataFrame, metric: str, split: str) -> None:
@@ -2917,7 +2932,7 @@ class ResidualFeatureBoosterConfig:
     residual_model_params: dict[str, Any]
     n_rounds: int = 5
     select_per_round: int = 1
-    main_metric: str = "valid_bad_rmse_reduction"
+    main_metric: str = "valid_bad_rmse_reduction_over_before"
     min_improvement: float = 0.0
     selection_mode: str = "top_k"
     selection_metric: str | None = None
@@ -3753,6 +3768,7 @@ def _empty_baseline_ratio_columns() -> dict[str, float]:
     for prefix in ("train", "valid", "test"):
         for group in ("bad", "good", "global"):
             for metric in ("rmse", "mae"):
+                result[f"{prefix}_{group}_{metric}_reduction_over_before"] = np.nan
                 result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
                 result[f"{prefix}_{group}_{metric}_after_over_baseline"] = np.nan
                 result[f"{prefix}_{group}_{metric}_reduction_from_baseline"] = np.nan
@@ -4628,10 +4644,19 @@ import unittest
 
 import pandas as pd
 
-from feature_boosting.reporting import final_metric_summary, iteration_residual_summary, round_residual_summary
+from feature_boosting.reporting import (
+    _ranking_metric_higher_is_better,
+    final_metric_summary,
+    iteration_residual_summary,
+    round_residual_summary,
+)
 
 
 class ReportingTests(unittest.TestCase):
+    def test_ranking_metric_direction_understands_relative_improvement(self) -> None:
+        self.assertTrue(_ranking_metric_higher_is_better("valid_bad_mae_reduction_over_before"))
+        self.assertFalse(_ranking_metric_higher_is_better("valid_bad_mae_after_over_baseline"))
+
     def test_round_residual_summary_keeps_one_final_point_per_round(self) -> None:
         baseline = pd.DataFrame(
             [
@@ -4801,8 +4826,13 @@ class ResidualBoostingTests(unittest.TestCase):
         ranking = result.rankings[0].set_index("feature_name")
         self.assertIn("valid_bad_rmse_after_over_baseline", ranking.columns)
         self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
+        before = float(ranking.loc["hidden", "valid_bad_rmse_before"])
+        after = float(ranking.loc["hidden", "valid_bad_rmse_after"])
+        relative_improvement = float(ranking.loc["hidden", "valid_bad_rmse_reduction_over_before"])
+        self.assertAlmostEqual(relative_improvement, (before - after) / before)
+        self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_reduction_over_before")
 
-    def test_threshold_mode_selects_by_residual_ratio(self) -> None:
+    def test_threshold_mode_selects_by_relative_improvement(self) -> None:
         df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
         valid_df = df[df["split"] == "valid"].copy()
@@ -4815,8 +4845,8 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy"},
                 n_rounds=1,
                 selection_mode="threshold",
-                selection_metric="bad_rmse_after_over_baseline",
-                selection_threshold=0.25,
+                selection_metric="bad_rmse_reduction_over_before",
+                selection_threshold=0.5,
                 max_select_per_round=None,
                 show_progress=False,
             )
@@ -5471,10 +5501,11 @@ BOOSTING_N_ROUNDS = 5
 
 # Feature selection knobs.
 # Rank mode example: BOOSTING_SELECTION_MODE="top_k", SELECT_PER_ROUND=20
-# Ratio threshold example: BOOSTING_SELECTION_MODE="threshold", BOOSTING_SELECTION_METRIC=f"bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline", BOOSTING_SELECTION_THRESHOLD=0.3
+# Relative-improvement threshold example: 0.2 means at least 20% lower loss than the previous iteration.
+# BOOSTING_SELECTION_MODE="threshold", BOOSTING_SELECTION_THRESHOLD=0.2
 SELECT_PER_ROUND = 1
 BOOSTING_SELECTION_MODE = "top_k"  # "top_k" or "threshold"
-BOOSTING_SELECTION_METRIC = f"bad_{EXPERIMENT_METRIC_LOWER}_reduction"
+BOOSTING_SELECTION_METRIC = f"bad_{EXPERIMENT_METRIC_LOWER}_reduction_over_before"
 BOOSTING_SELECTION_THRESHOLD = None
 BOOSTING_SELECTION_DIRECTION = "auto"
 BOOSTING_MAX_SELECT_PER_ROUND = None
@@ -5493,9 +5524,9 @@ OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = 0.25
 OVERFIT_GUARD_USE_TEST = False  # exploratory only; True uses test as an additional guard
 OVERFIT_GUARD_MAX_TEST_AFTER_OVER_BASELINE = 1.05
 
-# Candidate rank chart y-axis: after residual / base-feature-only baseline residual.
-CANDIDATE_LOSS_GLOBAL_METRIC_COL = f"valid_global_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
-CANDIDATE_LOSS_BAD_METRIC_COL = f"valid_bad_{EXPERIMENT_METRIC_LOWER}_after_over_baseline"
+# Candidate rank chart y-axis: (previous loss - after loss) / previous loss. Higher is better.
+CANDIDATE_LOSS_GLOBAL_METRIC_COL = f"valid_global_{EXPERIMENT_METRIC_LOWER}_reduction_over_before"
+CANDIDATE_LOSS_BAD_METRIC_COL = f"valid_bad_{EXPERIMENT_METRIC_LOWER}_reduction_over_before"
 
 # Optional known answer features per defect.
 # You can mix exact names and flexible matching rules.
@@ -5800,7 +5831,7 @@ display(baseline_summary.head(12))
 - residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
 - 기본 feature 선택은 validation bad group의 `EXPERIMENT_METRIC` reduction 기준입니다.
 - 노트북 설정에서 `top_k` 또는 `threshold` 방식으로 round별 선택 feature 수를 조절할 수 있습니다.
-- candidate rank chart의 y축은 기본적으로 `after residual / baseline residual` 비율입니다.
+- candidate rank chart의 y축은 `(previous loss - after loss) / previous loss` 상대 개선율입니다.
 - `ANSWER_FEATURES`에 defect별 정답인자를 넣으면 chart에 별도 마커로 표시됩니다.
 - test metric은 선택에 쓰지 않고 기록/검증용으로만 저장합니다.
 - round별 ranking, 선택 feature, residual curve를 CSV로 저장합니다.
@@ -6522,12 +6553,12 @@ METRIC_CHECK_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _metric_check_representatives(ranking):
-    metric_col = f"valid_bad_{METRIC_CHECK_NAME}_after_over_baseline"
+    metric_col = f"valid_bad_{METRIC_CHECK_NAME}_reduction_over_before"
     work = ranking.copy()
     if "fail_reason" in work.columns:
         work = work[work["fail_reason"].fillna("").astype(str).eq("")]
     work[metric_col] = pd.to_numeric(work[metric_col], errors="coerce")
-    work = work.dropna(subset=[metric_col]).sort_values(metric_col).reset_index(drop=True)
+    work = work.dropna(subset=[metric_col]).sort_values(metric_col, ascending=False).reset_index(drop=True)
     if work.empty:
         return work
 
@@ -6561,8 +6592,6 @@ if METRIC_CHECK_ENABLED:
 
     y_train_check = train_df[TARGET_COL].to_numpy(dtype=float)
     y_valid_check = valid_df[TARGET_COL].to_numpy(dtype=float)
-    baseline_train_check = train_df["baseline_pred"].to_numpy(dtype=float)
-    baseline_valid_check = valid_df["baseline_pred"].to_numpy(dtype=float)
 
     for defect in DEFECTS:
         defect_id = str(defect["defect_id"])
@@ -6590,8 +6619,8 @@ if METRIC_CHECK_ENABLED:
             print(f"[{defect_id}] metric check skipped: no validation bad samples")
             continue
 
-        bad_baseline = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], baseline_valid_check[bad_mask])
-        global_baseline = METRIC_CHECK_FUNCTION(y_valid_check, baseline_valid_check)
+        bad_previous = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], current_valid_check[bad_mask])
+        global_previous = METRIC_CHECK_FUNCTION(y_valid_check, current_valid_check)
 
         for _, ranking_row in representatives.iterrows():
             feature_name = str(ranking_row["feature_name"])
@@ -6603,19 +6632,19 @@ if METRIC_CHECK_ENABLED:
             pred_after = current_valid_check + correction
 
             direct_bad_after = METRIC_CHECK_FUNCTION(y_valid_check[bad_mask], pred_after[bad_mask])
-            direct_bad_ratio = direct_bad_after / bad_baseline
+            direct_bad_relative_improvement = (bad_previous - direct_bad_after) / bad_previous if np.isfinite(bad_previous) and bad_previous != 0 else np.nan
             direct_global_after = METRIC_CHECK_FUNCTION(y_valid_check, pred_after)
-            direct_global_ratio = direct_global_after / global_baseline
+            direct_global_relative_improvement = (global_previous - direct_global_after) / global_previous if np.isfinite(global_previous) and global_previous != 0 else np.nan
             stored_bad_after = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after"])
-            stored_bad_ratio = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_after_over_baseline"])
+            stored_bad_relative_improvement = float(ranking_row[f"valid_bad_{METRIC_CHECK_NAME}_reduction_over_before"])
             stored_global_after = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_after"])
-            stored_global_ratio = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_after_over_baseline"])
+            stored_global_relative_improvement = float(ranking_row[f"valid_global_{METRIC_CHECK_NAME}_reduction_over_before"])
 
             checks = [
                 _metric_values_match(stored_bad_after, direct_bad_after),
-                _metric_values_match(stored_bad_ratio, direct_bad_ratio),
+                _metric_values_match(stored_bad_relative_improvement, direct_bad_relative_improvement),
                 _metric_values_match(stored_global_after, direct_global_after),
-                _metric_values_match(stored_global_ratio, direct_global_ratio),
+                _metric_values_match(stored_global_relative_improvement, direct_global_relative_improvement),
             ]
             metric_check_rows.append({
                 "defect_id": defect_id,
@@ -6624,12 +6653,12 @@ if METRIC_CHECK_ENABLED:
                 "check_position": ranking_row["check_position"],
                 "feature_name": feature_name,
                 "metric_name": METRIC_CHECK_NAME,
-                "stored_bad_ratio": stored_bad_ratio,
-                "direct_bad_ratio": direct_bad_ratio,
-                "bad_ratio_abs_diff": abs(stored_bad_ratio - direct_bad_ratio),
-                "stored_global_ratio": stored_global_ratio,
-                "direct_global_ratio": direct_global_ratio,
-                "global_ratio_abs_diff": abs(stored_global_ratio - direct_global_ratio),
+                "stored_bad_relative_improvement": stored_bad_relative_improvement,
+                "direct_bad_relative_improvement": direct_bad_relative_improvement,
+                "bad_relative_improvement_abs_diff": abs(stored_bad_relative_improvement - direct_bad_relative_improvement),
+                "stored_global_relative_improvement": stored_global_relative_improvement,
+                "direct_global_relative_improvement": direct_global_relative_improvement,
+                "global_relative_improvement_abs_diff": abs(stored_global_relative_improvement - direct_global_relative_improvement),
                 "PASS": all(checks),
             })
 
@@ -6641,8 +6670,8 @@ if not metric_check_detail.empty:
             n_features_checked=("feature_name", "size"),
             n_passed=("PASS", "sum"),
             all_passed=("PASS", "all"),
-            max_bad_ratio_abs_diff=("bad_ratio_abs_diff", "max"),
-            max_global_ratio_abs_diff=("global_ratio_abs_diff", "max"),
+            max_bad_relative_improvement_abs_diff=("bad_relative_improvement_abs_diff", "max"),
+            max_global_relative_improvement_abs_diff=("global_relative_improvement_abs_diff", "max"),
         )
     )
     write_csv(metric_check_detail, METRIC_CHECK_DIR / "metric_check_detail.csv")
@@ -6706,7 +6735,7 @@ if TOP1_CURVE_ENABLED:
             "ranking_metric": row.get("ranking_metric", ""),
             "metric_name": TOP1_CURVE_METRIC_NAME,
             "valid_bad_metric_reduction": row.get(f"valid_bad_{TOP1_CURVE_METRIC_NAME}_reduction", np.nan),
-            "valid_bad_metric_after_over_baseline": row.get(f"valid_bad_{TOP1_CURVE_METRIC_NAME}_after_over_baseline", np.nan),
+            "valid_bad_metric_relative_improvement": row.get(f"valid_bad_{TOP1_CURVE_METRIC_NAME}_reduction_over_before", np.nan),
             "selected_in_boosting": bool(row.get("selected", False)),
             "overfit_guard_pass": bool(row.get("overfit_guard_pass", False)),
         })
@@ -7186,11 +7215,13 @@ def _add_block_split_metrics(row, *, prefix, df, y, before_pred, after_pred, bas
         row[f"{prefix}_{group_name}_rmse_before"] = before_rmse
         row[f"{prefix}_{group_name}_rmse_after"] = after_rmse
         row[f"{prefix}_{group_name}_rmse_reduction"] = reduction(before_rmse, after_rmse)
+        row[f"{prefix}_{group_name}_rmse_reduction_over_before"] = _safe_ratio(reduction(before_rmse, after_rmse), before_rmse)
         row[f"{prefix}_{group_name}_rmse_baseline"] = baseline_rmse
         row[f"{prefix}_{group_name}_rmse_after_over_baseline"] = _safe_ratio(after_rmse, baseline_rmse)
         row[f"{prefix}_{group_name}_mae_before"] = before_mae
         row[f"{prefix}_{group_name}_mae_after"] = after_mae
         row[f"{prefix}_{group_name}_mae_reduction"] = reduction(before_mae, after_mae)
+        row[f"{prefix}_{group_name}_mae_reduction_over_before"] = _safe_ratio(reduction(before_mae, after_mae), before_mae)
         row[f"{prefix}_{group_name}_mae_baseline"] = baseline_mae
         row[f"{prefix}_{group_name}_mae_after_over_baseline"] = _safe_ratio(after_mae, baseline_mae)
 
