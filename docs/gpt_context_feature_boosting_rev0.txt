@@ -6258,6 +6258,133 @@ elif TOP1_CURVE_ENABLED:
     print("Section 6-3 skipped: no rank 1 feature was found. Run section 6 first.")
 
 --- CELL 20 [markdown] ---
+## 6-4. Boosted/answer feature X-Y data table
+
+각 defect에서 boosting으로 선택된 상위 feature와 `ANSWER_FEATURES`에 입력한 정답인자의 X-Y 데이터를 long-format 표로 만듭니다.
+
+- `defect_id`로 defect_1, defect_2, defect_3을 구분합니다.
+- `feature_name`, `x_value`, `y_value`를 한 행에서 확인할 수 있습니다.
+- `is_boosted_feature`, `is_answer_feature`로 feature 역할을 구분합니다.
+- `defect_group`에는 각 wafer가 bad, good, unlabeled 중 어디에 속하는지 표시합니다.
+- `FEATURE_XY_TOP_N_BOOSTED=None`이면 선택된 feature 전체를, `1`이면 defect별 첫 번째 feature만 사용합니다.
+
+--- CELL 21 [code] ---
+FEATURE_XY_ENABLED = True
+FEATURE_XY_TOP_N_BOOSTED = None  # None: all selected features; 1, 5, ...: top N per defect
+FEATURE_XY_SAMPLE_SCOPE = "all"  # "all", "bad", or "good"
+FEATURE_XY_DIR = OUT_DIR / "feature_xy_tables"
+FEATURE_XY_DIR.mkdir(parents=True, exist_ok=True)
+
+feature_xy_catalog_rows = []
+feature_xy_frames = []
+
+if FEATURE_XY_ENABLED:
+    scope = str(FEATURE_XY_SAMPLE_SCOPE).strip().lower()
+    if scope not in {"all", "bad", "good"}:
+        raise ValueError("FEATURE_XY_SAMPLE_SCOPE must be 'all', 'bad', or 'good'")
+
+    optional_id_cols = [col for col in ("lot_id", "wf_id") if col in all_df.columns and col != ID_COL]
+    base_output_cols = [ID_COL, *optional_id_cols, SPLIT_COL, TARGET_COL]
+
+    for defect in DEFECTS:
+        defect_id = str(defect["defect_id"])
+        groups = defect_groups[defect_id]
+
+        selected_for_defect = selected_features.iloc[0:0].copy()
+        if not selected_features.empty and {"defect_id", "feature_name"}.issubset(selected_features.columns):
+            selected_for_defect = selected_features[
+                selected_features["defect_id"].astype(str).eq(defect_id)
+            ].copy()
+            selected_for_defect["_selection_order"] = np.arange(1, len(selected_for_defect) + 1)
+            selected_for_defect = selected_for_defect.drop_duplicates("feature_name", keep="first")
+            if FEATURE_XY_TOP_N_BOOSTED is not None:
+                selected_for_defect = selected_for_defect.head(max(0, int(FEATURE_XY_TOP_N_BOOSTED)))
+
+        boosted_meta = {
+            str(row["feature_name"]): {
+                "boosting_order": int(row["_selection_order"]),
+                "boosting_round": row.get("round", np.nan),
+                "boosting_ranking_metric": row.get("ranking_metric", ""),
+                "boosting_metric_value": row.get(str(row.get("ranking_metric", "")), np.nan),
+            }
+            for _, row in selected_for_defect.iterrows()
+        }
+        boosted_cols = list(boosted_meta)
+
+        answer_rules = ANSWER_FEATURES.get(defect_id, [])
+        candidate_series = pd.Series(candidate_cols, dtype=str)
+        answer_cols = candidate_series[answer_feature_mask(candidate_series, answer_rules)].tolist() if answer_rules else []
+        feature_cols_for_table = list(dict.fromkeys([*boosted_cols, *answer_cols]))
+
+        if not feature_cols_for_table:
+            print(f"[{defect_id}] 6-4 skipped: no boosted or answer feature")
+            continue
+
+        feature_flags = add_answer_feature_flags(
+            pd.DataFrame({"feature_name": feature_cols_for_table}),
+            feature_col="feature_name",
+            rules=answer_rules,
+        ).set_index("feature_name")
+
+        sample_ids = all_df[ID_COL].astype(str)
+        defect_group = np.select(
+            [sample_ids.isin(groups["bad"]), sample_ids.isin(groups["good"])],
+            ["bad", "good"],
+            default="unlabeled",
+        )
+
+        for feature_name in feature_cols_for_table:
+            if feature_name not in all_df.columns:
+                print(f"[{defect_id}] 6-4 skipped missing column: {feature_name}")
+                continue
+
+            meta = boosted_meta.get(feature_name, {})
+            is_boosted = feature_name in boosted_meta
+            is_answer = bool(feature_flags.loc[feature_name, "is_answer_feature"])
+            feature_role = "boosted_and_answer" if is_boosted and is_answer else ("boosted" if is_boosted else "answer")
+            answer_rule = feature_flags.loc[feature_name, "answer_match_rule"] if "answer_match_rule" in feature_flags.columns else ""
+            catalog_row = {
+                "defect_id": defect_id,
+                "feature_name": feature_name,
+                "feature_role": feature_role,
+                "is_boosted_feature": is_boosted,
+                "is_answer_feature": is_answer,
+                "boosting_order": meta.get("boosting_order", np.nan),
+                "boosting_round": meta.get("boosting_round", np.nan),
+                "boosting_ranking_metric": meta.get("boosting_ranking_metric", ""),
+                "boosting_metric_value": meta.get("boosting_metric_value", np.nan),
+                "answer_match_rule": answer_rule,
+            }
+            feature_xy_catalog_rows.append(catalog_row)
+
+            xy = all_df[base_output_cols].copy()
+            xy.insert(0, "defect_id", defect_id)
+            xy["defect_group"] = defect_group
+            xy["feature_name"] = feature_name
+            xy["feature_role"] = catalog_row["feature_role"]
+            xy["x_value"] = all_df[feature_name].to_numpy()
+            xy["y_value"] = xy[TARGET_COL]
+            xy["is_boosted_feature"] = catalog_row["is_boosted_feature"]
+            xy["is_answer_feature"] = catalog_row["is_answer_feature"]
+            xy["boosting_order"] = catalog_row["boosting_order"]
+            xy["boosting_round"] = catalog_row["boosting_round"]
+            xy["answer_match_rule"] = catalog_row["answer_match_rule"]
+            xy = xy.drop(columns=[TARGET_COL])
+            if scope != "all":
+                xy = xy[xy["defect_group"].eq(scope)].copy()
+            feature_xy_frames.append(xy)
+
+feature_xy_catalog = pd.DataFrame(feature_xy_catalog_rows)
+feature_xy_data = pd.concat(feature_xy_frames, ignore_index=True) if feature_xy_frames else pd.DataFrame()
+write_csv(feature_xy_catalog, FEATURE_XY_DIR / "boosted_answer_feature_catalog.csv")
+write_csv(feature_xy_data, FEATURE_XY_DIR / "boosted_answer_xy_long.csv")
+
+print("feature catalog rows:", len(feature_xy_catalog))
+print("X-Y data rows:", len(feature_xy_data))
+display(feature_xy_catalog)
+display(feature_xy_data.head(30))
+
+--- CELL 22 [markdown] ---
 ## 7. Final model: Xb + selected Xnew 재학습
 
 **이 셀에서 하는 일**
@@ -6272,7 +6399,7 @@ elif TOP1_CURVE_ENABLED:
 **입력**: `selected_features`, `base_feature_cols`, `all_df`  
 **출력**: `final_model`, `final_pred`, `final_model_metrics.csv`, `final_model_metric_summary.csv`, `plots/final_model_metric_comparison.png`
 
---- CELL 21 [code] ---
+--- CELL 23 [code] ---
 selected_cols = []
 if not selected_features.empty:
     for feature in selected_features["feature_name"].dropna().astype(str):
@@ -6345,7 +6472,7 @@ if fig is not None:
 display(final_metric_summary_df)
 display(final_metrics)
 
---- CELL 22 [markdown] ---
+--- CELL 24 [markdown] ---
 ## 8. Optional SHAP 검증
 
 **이 셀에서 하는 일**
@@ -6360,7 +6487,7 @@ SHAP은 원인 확정이 아니라, 선택 feature가 final model에서 실제�
 **입력**: `final_model`, test set, `selected_features`  
 **출력**: `shap_summary.csv`
 
---- CELL 23 [code] ---
+--- CELL 25 [code] ---
 if SHAP_ENABLED:
     shap_summary = compute_shap_summary(
         final_model,
@@ -6377,7 +6504,7 @@ else:
 write_csv(shap_summary, OUT_DIR / "shap_summary.csv")
 display(shap_summary.head(30))
 
---- CELL 24 [markdown] ---
+--- CELL 26 [markdown] ---
 ## 9. 산출물 확인
 
 **이 셀에서 하는 일**
@@ -6389,13 +6516,13 @@ display(shap_summary.head(30))
 **입력**: `OUT_DIR`  
 **출력**: 저장된 산출물 목록
 
---- CELL 25 [code] ---
+--- CELL 27 [code] ---
 print("saved to:", OUT_DIR)
 for path in sorted(OUT_DIR.rglob("*")):
     if path.is_file():
         print(path.relative_to(OUT_DIR))
 
---- CELL 26 [markdown] ---
+--- CELL 28 [markdown] ---
 ## 10. Second experiment: block preselection residual boosting
 
 **? ??? ?? ?**
@@ -6408,7 +6535,7 @@ for path in sorted(OUT_DIR.rglob("*")):
 
 **??**: `OUT_DIR / "block_experiment"` ?? block ranking, block ?? feature ranking, ?? ?? feature CSV? plot
 
---- CELL 27 [code] ---
+--- CELL 29 [code] ---
 from feature_boosting.metrics import mae, rmse, reduction
 from feature_boosting.modeling import fit_regressor, predict_regressor
 
@@ -6427,7 +6554,7 @@ print("BLOCK_EXPERIMENT_DIR =", BLOCK_EXPERIMENT_DIR)
 print("BLOCK_SIZE =", BLOCK_SIZE)
 print("BLOCK_FINAL_SELECTION_MODE =", BLOCK_FINAL_SELECTION_MODE)
 
---- CELL 28 [code] ---
+--- CELL 30 [code] ---
 def _block_metric_name(metric, *, use_test=False):
     if metric in {"bad_rmse_reduction", "rmse_reduction"}:
         return "test_bad_rmse_reduction" if use_test else "valid_bad_rmse_reduction"
@@ -6635,7 +6762,7 @@ def _select_from_ranked_frame(frame, *, metric_col, mode, top_k, threshold, high
         selected = selected[pd.to_numeric(selected[metric_col], errors="coerce") <= float(threshold)]
     return selected
 
---- CELL 29 [code] ---
+--- CELL 31 [code] ---
 if BLOCK_EXPERIMENT_ENABLED:
     standard_one_round_start_time = time.perf_counter()
     standard_one_round_booster = ResidualFeatureBooster(
