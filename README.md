@@ -156,10 +156,12 @@ selected_answer_feature_metrics_by_iteration.csv
 boosting_iteration_audit.csv
 global_iteration_feature_metric_summary.csv
 test_raw_predictions_by_iteration.csv
+test_y_vs_ypred_wide_by_iteration.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
 plots/{defect_id}_round_{round}_candidate_loss.png
 plots/round_mean_abs_residual_points.png
+plots/test_y_vs_ypred_scatter_by_iteration.png
 plots/final_model_metric_comparison.png
 plots/final_feature_set_summary.png
 models/baseline_model.cbm

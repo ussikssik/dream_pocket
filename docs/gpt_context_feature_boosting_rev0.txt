@@ -197,10 +197,12 @@ selected_answer_feature_metrics_by_iteration.csv
 boosting_iteration_audit.csv
 global_iteration_feature_metric_summary.csv
 test_raw_predictions_by_iteration.csv
+test_y_vs_ypred_wide_by_iteration.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
 plots/{defect_id}_round_{round}_candidate_loss.png
 plots/round_mean_abs_residual_points.png
+plots/test_y_vs_ypred_scatter_by_iteration.png
 plots/final_model_metric_comparison.png
 plots/final_feature_set_summary.png
 models/baseline_model.cbm
@@ -5961,6 +5963,8 @@ display(baseline_summary.head(12))
 | iter0부터 iterN까지 train/valid/test R2, MAE, RMSE | `global_iteration_feature_metric_summary.csv` | `iter`, `defect_id`, `round`, `train_r2`, `train_mae`, `train_rmse`, `valid_*`, `test_*` |
 | iter별 base model feature 수 | `global_iteration_feature_metric_summary.csv` | `n_base_features`, `n_boosted_features`, `n_total_features` |
 | iter별 test wafer 예측값과 residual raw data | `test_raw_predictions_by_iteration.csv` | `iter`, sample ID, `y_true`, `pred_after`, `residual_after` |
+| test wafer별 y와 iter별 y_pred wide table | `test_y_vs_ypred_wide_by_iteration.csv` | sample ID, `y`, `ypred_0`, `ypred_1`, ..., `ypred_N` |
+| iter0부터 iterN까지 test y vs y_pred scatter | `plots/test_y_vs_ypred_scatter_by_iteration.png` | 같은 축 범위의 iteration 순서별 subplot |
 
 `n_base_features`는 최초 base feature 수라 고정입니다. 누적 선택 feature 수는 `n_boosted_features`, 실제 재학습 base model의 전체 feature 수는 `n_total_features`이며 iteration이 진행되면서 증가합니다.
 
@@ -6220,8 +6224,73 @@ else:
     test_raw_by_iteration = test_baseline_raw
 write_csv(test_raw_by_iteration, OUT_DIR / "test_raw_predictions_by_iteration.csv")
 
+# Build one row per test wafer: y, ypred_0, ypred_1, ..., ypred_N.
+test_raw_by_iteration["iter"] = pd.to_numeric(test_raw_by_iteration["iter"], errors="coerce")
+test_prediction_pivot = test_raw_by_iteration.pivot_table(
+    index=ID_COL,
+    columns="iter",
+    values="pred_after",
+    aggfunc="first",
+).sort_index(axis=1)
+test_prediction_pivot.columns = [f"ypred_{int(iter_no)}" for iter_no in test_prediction_pivot.columns]
+test_y_vs_ypred_wide = pd.DataFrame({
+    ID_COL: test_df[ID_COL].astype(str).to_numpy(),
+    "y": test_df[TARGET_COL].to_numpy(dtype=float),
+}).merge(test_prediction_pivot.reset_index(), on=ID_COL, how="left")
+write_csv(test_y_vs_ypred_wide, OUT_DIR / "test_y_vs_ypred_wide_by_iteration.csv")
+
 import matplotlib.pyplot as plt
 iter_ticks = global_iteration_summary["iter"].astype(int).tolist()
+ypred_iters = [iter_no for iter_no in iter_ticks if f"ypred_{iter_no}" in test_y_vs_ypred_wide.columns]
+if ypred_iters:
+    scatter_values = [test_y_vs_ypred_wide["y"].to_numpy(dtype=float)]
+    scatter_values.extend(test_y_vs_ypred_wide[f"ypred_{iter_no}"].to_numpy(dtype=float) for iter_no in ypred_iters)
+    finite_scatter_values = np.concatenate(scatter_values)
+    finite_scatter_values = finite_scatter_values[np.isfinite(finite_scatter_values)]
+    axis_min = float(finite_scatter_values.min())
+    axis_max = float(finite_scatter_values.max())
+    axis_padding = max((axis_max - axis_min) * 0.05, 1e-9)
+    axis_limits = (axis_min - axis_padding, axis_max + axis_padding)
+
+    scatter_n_cols = min(5, len(ypred_iters))
+    scatter_n_rows = int(np.ceil(len(ypred_iters) / scatter_n_cols))
+    fig, axes = plt.subplots(
+        scatter_n_rows, scatter_n_cols,
+        figsize=(4.0 * scatter_n_cols, 4.0 * scatter_n_rows),
+        squeeze=False,
+    )
+    y_true_scatter = test_y_vs_ypred_wide["y"].to_numpy(dtype=float)
+    for panel_idx, iter_no in enumerate(ypred_iters):
+        ax = axes.flat[panel_idx]
+        y_pred_scatter = test_y_vs_ypred_wide[f"ypred_{iter_no}"].to_numpy(dtype=float)
+        finite_mask = np.isfinite(y_true_scatter) & np.isfinite(y_pred_scatter)
+        ax.scatter(
+            y_true_scatter[finite_mask], y_pred_scatter[finite_mask],
+            s=14, alpha=0.45, color="#4e79a7", edgecolors="none",
+        )
+        ax.plot(axis_limits, axis_limits, linestyle="--", linewidth=1.2, color="#e15759", label="y = y_pred")
+        metric_rows = global_iteration_summary[global_iteration_summary["iter"].astype(int) == int(iter_no)]
+        if not metric_rows.empty:
+            metric_row = metric_rows.iloc[0]
+            ax.set_title(
+                f"iter {iter_no}\n"
+                f"R2={metric_row['test_r2']:.4f} | MAE={metric_row['test_mae']:.4f} | RMSE={metric_row['test_rmse']:.4f}"
+            )
+        else:
+            ax.set_title(f"iter {iter_no}")
+        ax.set_xlim(axis_limits)
+        ax.set_ylim(axis_limits)
+        ax.set_aspect("equal", adjustable="box")
+        ax.set_xlabel("y")
+        ax.set_ylabel("y_pred")
+        ax.grid(alpha=0.2)
+    for panel_idx in range(len(ypred_iters), axes.size):
+        axes.flat[panel_idx].axis("off")
+    fig.suptitle("test y vs y_pred by global iteration", fontsize=14)
+    fig.tight_layout(rect=(0, 0, 1, 0.97))
+    fig.savefig(OUT_DIR / "plots" / "test_y_vs_ypred_scatter_by_iteration.png", dpi=150, bbox_inches="tight")
+    display(fig)
+display(test_y_vs_ypred_wide)
 
 fig, axes = plt.subplots(1, 2, figsize=(15, 4.5))
 axes[0].plot(global_iteration_summary["iter"], global_iteration_summary["n_base_features"], marker="o", label="base features")
