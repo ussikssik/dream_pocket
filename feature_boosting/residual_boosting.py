@@ -24,7 +24,7 @@ class ResidualFeatureBoosterConfig:
     residual_model_params: dict[str, Any]
     n_rounds: int = 5
     select_per_round: int = 1
-    main_metric: str = "valid_bad_rmse_reduction_over_before"
+    main_metric: str = "valid_bad_rmse_after_over_before"
     min_improvement: float = 0.0
     selection_mode: str = "top_k"
     selection_metric: str | None = None
@@ -866,12 +866,18 @@ def _reduction_columns(
         result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]
         result[f"{prefix}_{name}_rmse_after"] = values["rmse_after"]
         result[f"{prefix}_{name}_rmse_reduction"] = values["rmse_reduction"]
+        result[f"{prefix}_{name}_rmse_after_over_before"] = _safe_divide(
+            values["rmse_after"], values["rmse_before"]
+        )
         result[f"{prefix}_{name}_rmse_reduction_over_before"] = _safe_divide(
             values["rmse_reduction"], values["rmse_before"]
         )
         result[f"{prefix}_{name}_mae_before"] = values["mae_before"]
         result[f"{prefix}_{name}_mae_after"] = values["mae_after"]
         result[f"{prefix}_{name}_mae_reduction"] = values["mae_reduction"]
+        result[f"{prefix}_{name}_mae_after_over_before"] = _safe_divide(
+            values["mae_after"], values["mae_before"]
+        )
         result[f"{prefix}_{name}_mae_reduction_over_before"] = _safe_divide(
             values["mae_reduction"], values["mae_before"]
         )
@@ -929,7 +935,12 @@ def _higher_is_better(metric: str, direction: str) -> bool:
     if normalized in {"lower", "minimize", "min", "lte", "<="}:
         return False
     lower_metric = metric.lower()
-    if "over_baseline" in lower_metric or lower_metric.endswith("_after") or lower_metric.endswith("_ratio"):
+    if (
+        "after_over_before" in lower_metric
+        or "over_baseline" in lower_metric
+        or lower_metric.endswith("_after")
+        or lower_metric.endswith("_ratio")
+    ):
         return False
     return True
 
@@ -970,6 +981,7 @@ def _empty_baseline_ratio_columns() -> dict[str, float]:
     for prefix in ("train", "valid", "test"):
         for group in ("bad", "good", "global"):
             for metric in ("rmse", "mae"):
+                result[f"{prefix}_{group}_{metric}_after_over_before"] = np.nan
                 result[f"{prefix}_{group}_{metric}_reduction_over_before"] = np.nan
                 result[f"{prefix}_{group}_{metric}_baseline"] = np.nan
                 result[f"{prefix}_{group}_{metric}_after_over_baseline"] = np.nan
@@ -992,59 +1004,71 @@ def _selected_record(row: dict[str, Any]) -> dict[str, Any]:
         "train_bad_rmse_baseline",
         "train_bad_rmse_before",
         "train_bad_rmse_after",
+        "train_bad_rmse_after_over_before",
         "train_bad_rmse_reduction",
         "train_bad_rmse_reduction_over_before",
         "train_bad_rmse_after_over_baseline",
         "valid_bad_rmse_baseline",
         "valid_bad_rmse_before",
         "valid_bad_rmse_after",
+        "valid_bad_rmse_after_over_before",
         "valid_bad_rmse_reduction",
         "valid_bad_rmse_reduction_over_before",
         "valid_bad_rmse_after_over_baseline",
         "valid_bad_rmse_reduction_from_baseline_pct",
         "test_bad_rmse_before",
         "test_bad_rmse_after",
+        "test_bad_rmse_after_over_before",
         "test_bad_rmse_reduction",
         "test_bad_rmse_reduction_over_before",
         "test_bad_rmse_after_over_baseline",
         "valid_good_rmse_reduction",
         "test_good_rmse_reduction",
         "valid_global_rmse_after",
+        "valid_global_rmse_after_over_before",
         "valid_global_rmse_reduction",
         "valid_global_rmse_after_over_baseline",
         "train_global_rmse_after",
+        "train_global_rmse_after_over_before",
         "train_global_rmse_reduction",
         "train_global_rmse_after_over_baseline",
         "test_global_rmse_after",
+        "test_global_rmse_after_over_before",
         "test_global_rmse_reduction",
         "test_global_rmse_after_over_baseline",
         "train_bad_mae_baseline",
         "train_bad_mae_before",
         "train_bad_mae_after",
+        "train_bad_mae_after_over_before",
         "train_bad_mae_reduction",
         "train_bad_mae_reduction_over_before",
         "train_bad_mae_after_over_baseline",
         "valid_bad_mae_baseline",
         "valid_bad_mae_before",
         "valid_bad_mae_after",
+        "valid_bad_mae_after_over_before",
         "valid_bad_mae_reduction",
         "valid_bad_mae_reduction_over_before",
         "valid_bad_mae_after_over_baseline",
         "valid_bad_mae_reduction_from_baseline_pct",
         "test_bad_mae_before",
         "test_bad_mae_after",
+        "test_bad_mae_after_over_before",
         "test_bad_mae_reduction",
         "test_bad_mae_reduction_over_before",
         "test_bad_mae_after_over_baseline",
         "valid_good_mae_reduction",
         "test_good_mae_reduction",
         "valid_global_mae_after",
+        "valid_global_mae_after_over_before",
         "valid_global_mae_reduction",
         "valid_global_mae_after_over_baseline",
         "train_global_mae_after",
+        "train_global_mae_after_over_before",
         "train_global_mae_reduction",
         "train_global_mae_after_over_baseline",
         "test_global_mae_after",
+        "test_global_mae_after_over_before",
         "test_global_mae_reduction",
         "test_global_mae_after_over_baseline",
         "overfit_guard_pass",

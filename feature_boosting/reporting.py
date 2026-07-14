@@ -492,8 +492,8 @@ def plot_candidate_loss_ranking(
     ranking_df: pd.DataFrame,
     *,
     output_path: str | Path | None = None,
-    global_metric_col: str = "valid_global_rmse_reduction_over_before",
-    bad_metric_col: str = "valid_bad_rmse_reduction_over_before",
+    global_metric_col: str = "valid_global_rmse_after_over_before",
+    bad_metric_col: str = "valid_bad_rmse_after_over_before",
     selected_col: str = "selected",
     answer_features: Any = None,
     answer_col: str = "is_answer_feature",
@@ -560,7 +560,9 @@ def _plot_loss_axis(
 
     x = np.arange(1, len(work) + 1)
     ax.scatter(x, work[metric_col], s=13, alpha=0.75, label=metric_col)
-    if "over_baseline" in metric_col:
+    if "after_over_before" in metric_col:
+        ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="no improvement = 1.0")
+    elif "over_baseline" in metric_col:
         ax.axhline(1.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="baseline residual ratio = 1.0")
     elif "reduction_over_before" in metric_col or "relative_improvement" in metric_col:
         ax.axhline(0.0, color="#6c757d", linestyle="--", linewidth=1.0, alpha=0.8, label="no improvement = 0.0")
@@ -668,7 +670,9 @@ def _plot_loss_axis(
 
     ax.set_title(title)
     ax.set_xlabel("feature rank (best to worst)")
-    if "reduction_over_before" in metric_col or "relative_improvement" in metric_col:
+    if "after_over_before" in metric_col:
+        ylabel = "after residual / previous residual"
+    elif "reduction_over_before" in metric_col or "relative_improvement" in metric_col:
         ylabel = "(previous loss - after loss) / previous loss"
     elif "over_baseline" in metric_col:
         ylabel = "after residual / baseline residual"
@@ -689,6 +693,8 @@ def _answer_rank_x(row: pd.Series, *, fallback: int) -> int:
 
 def _ranking_metric_higher_is_better(metric_col: str) -> bool:
     metric = str(metric_col).lower()
+    if "after_over_before" in metric:
+        return False
     if "reduction" in metric or "improvement" in metric:
         return True
     if "over_baseline" in metric or metric.endswith("_after") or metric.endswith("_loss"):

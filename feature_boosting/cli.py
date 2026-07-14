@@ -211,19 +211,19 @@ def run_experiment(config_path: Path) -> int:
             plot_candidate_loss_ranking(
                 ranking_df,
                 output_path=output_dir / "plots" / f"{defect.defect_id}_round_{round_no}_candidate_loss.png",
-                global_metric_col="valid_global_rmse_reduction_over_before",
-                bad_metric_col="valid_bad_rmse_reduction_over_before",
+                global_metric_col="valid_global_rmse_after_over_before",
+                bad_metric_col="valid_bad_rmse_after_over_before",
                 title_prefix=f"{defect.defect_id} round {round_no}",
             )
         if not result.selected_features.empty:
             selected_frames.append(result.selected_features)
             first = result.selected_features.iloc[0]
             logger.info(
-                "[BOOST %s round %s] selected feature: %s, valid_bad_rmse_reduction=%s",
+                "[BOOST %s round %s] selected feature: %s, valid_bad_rmse_after_over_before=%s",
                 defect.defect_id,
                 first["round"],
                 first["feature_name"],
-                round(float(first["valid_bad_rmse_reduction"]), 6),
+                round(float(first["valid_bad_rmse_after_over_before"]), 6),
             )
         if not result.residual_curve.empty:
             curve_frames.append(result.residual_curve)

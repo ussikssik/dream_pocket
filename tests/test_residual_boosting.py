@@ -75,9 +75,9 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertLess(float(ranking.loc["hidden", "valid_bad_rmse_after_over_baseline"]), 1.0)
         before = float(ranking.loc["hidden", "valid_bad_rmse_before"])
         after = float(ranking.loc["hidden", "valid_bad_rmse_after"])
-        relative_improvement = float(ranking.loc["hidden", "valid_bad_rmse_reduction_over_before"])
-        self.assertAlmostEqual(relative_improvement, (before - after) / before)
-        self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_reduction_over_before")
+        remaining_ratio = float(ranking.loc["hidden", "valid_bad_rmse_after_over_before"])
+        self.assertAlmostEqual(remaining_ratio, after / before)
+        self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_after_over_before")
         expected_model = fit_regressor(
             train_df,
             train_df["yield"].to_numpy(dtype=float),

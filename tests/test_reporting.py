@@ -15,6 +15,7 @@ from feature_boosting.reporting import (
 class ReportingTests(unittest.TestCase):
     def test_ranking_metric_direction_understands_relative_improvement(self) -> None:
         self.assertTrue(_ranking_metric_higher_is_better("valid_bad_mae_reduction_over_before"))
+        self.assertFalse(_ranking_metric_higher_is_better("valid_bad_mae_after_over_before"))
         self.assertFalse(_ranking_metric_higher_is_better("valid_bad_mae_after_over_baseline"))
 
     def test_round_residual_summary_keeps_one_final_point_per_round(self) -> None:

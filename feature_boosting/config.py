@@ -39,7 +39,7 @@ class FeatureFilterConfig:
 class BoostingConfig:
     n_rounds: int = 5
     select_per_round: int = 1
-    main_metric: str = "valid_bad_rmse_reduction_over_before"
+    main_metric: str = "valid_bad_rmse_after_over_before"
     min_improvement: float = 0.0
     selection_mode: str = "top_k"
     selection_metric: str | None = None
