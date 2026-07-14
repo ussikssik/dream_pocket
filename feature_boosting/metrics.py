@@ -44,11 +44,26 @@ def reduction(before: float, after: float) -> float:
     return float(before - after)
 
 
-def residual_reduction_metrics(y_true, pred_before, pred_after) -> dict[str, float]:
-    before_mae = mae(y_true, pred_before)
-    after_mae = mae(y_true, pred_after)
-    before_rmse = rmse(y_true, pred_before)
-    after_rmse = rmse(y_true, pred_after)
+def residual_reduction_from_residuals(residual_before, residual_after) -> dict[str, float]:
+    before = np.asarray(residual_before, dtype=float)
+    after = np.asarray(residual_after, dtype=float)
+    mask = np.isfinite(before) & np.isfinite(after)
+    before = before[mask]
+    after = after[mask]
+    if before.size == 0:
+        return {
+            "mae_before": float("nan"),
+            "mae_after": float("nan"),
+            "mae_reduction": float("nan"),
+            "rmse_before": float("nan"),
+            "rmse_after": float("nan"),
+            "rmse_reduction": float("nan"),
+        }
+
+    before_mae = float(np.mean(np.abs(before)))
+    after_mae = float(np.mean(np.abs(after)))
+    before_rmse = float(np.sqrt(np.mean(before**2)))
+    after_rmse = float(np.sqrt(np.mean(after**2)))
     return {
         "mae_before": before_mae,
         "mae_after": after_mae,
@@ -57,3 +72,11 @@ def residual_reduction_metrics(y_true, pred_before, pred_after) -> dict[str, flo
         "rmse_after": after_rmse,
         "rmse_reduction": reduction(before_rmse, after_rmse),
     }
+
+
+def residual_reduction_metrics(y_true, pred_before, pred_after) -> dict[str, float]:
+    true = np.asarray(y_true, dtype=float)
+    before = np.asarray(pred_before, dtype=float)
+    after = np.asarray(pred_after, dtype=float)
+    mask = np.isfinite(true) & np.isfinite(before) & np.isfinite(after)
+    return residual_reduction_from_residuals(true[mask] - before[mask], true[mask] - after[mask])

@@ -7,7 +7,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from .metrics import mae, r2, reduction, residual_reduction_metrics, rmse
+from .metrics import mae, r2, reduction, residual_reduction_from_residuals, rmse
 from .modeling import fit_regressor, predict_regressor
 
 try:
@@ -448,7 +448,12 @@ class ResidualFeatureBooster:
         try:
             residual_train = y_train - current_pred_train
             residual_valid = y_valid - current_pred_valid
-            if not np.isfinite(residual_train).all() or not np.isfinite(residual_valid).all():
+            residual_test = y_test - current_pred_test
+            if (
+                not np.isfinite(residual_train).all()
+                or not np.isfinite(residual_valid).all()
+                or not np.isfinite(residual_test).all()
+            ):
                 raise ValueError("residual contains NaN or inf")
             model = fit_regressor(
                 train_df,
@@ -467,9 +472,12 @@ class ResidualFeatureBooster:
             base_row["fail_reason"] = f"model_fit_failed:{type(exc).__name__}"
             return _ScorePayload(base_row)
 
-        pred_train_after = current_pred_train + pred_train
-        pred_valid_after = current_pred_valid + pred_valid
-        pred_test_after = current_pred_test + pred_test
+        residual_train_after = residual_train - pred_train
+        residual_valid_after = residual_valid - pred_valid
+        residual_test_after = residual_test - pred_test
+        pred_train_after = y_train - residual_train_after
+        pred_valid_after = y_valid - residual_valid_after
+        pred_test_after = y_test - residual_test_after
         base_row.update(
             _reduction_columns(
                 prefix="train",
@@ -849,8 +857,10 @@ def _reduction_columns(
     good = _mask(df, id_col, good_sample_ids)
     groups = {"bad": bad, "good": good, "global": np.ones(len(df), dtype=bool)}
     result: dict[str, float] = {}
+    residual_before = y - before
+    residual_after = y - after
     for name, mask in groups.items():
-        values = residual_reduction_metrics(y[mask], before[mask], after[mask])
+        values = residual_reduction_from_residuals(residual_before[mask], residual_after[mask])
         baseline_rmse = rmse(y[mask], baseline[mask])
         baseline_mae = mae(y[mask], baseline[mask])
         result[f"{prefix}_{name}_rmse_before"] = values["rmse_before"]

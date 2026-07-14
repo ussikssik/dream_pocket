@@ -4,7 +4,7 @@ import unittest
 
 import pandas as pd
 
-from feature_boosting.metrics import mae, residual_reduction_metrics, rmse
+from feature_boosting.metrics import mae, residual_reduction_from_residuals, residual_reduction_metrics, rmse
 from feature_boosting.reporting import round_residual_summary
 
 
@@ -17,6 +17,18 @@ class MetricTests(unittest.TestCase):
         metrics = residual_reduction_metrics([1, 2, 3], [1, 1, 1], [1, 2, 3])
         self.assertGreater(metrics["rmse_reduction"], 0)
         self.assertGreater(metrics["mae_reduction"], 0)
+
+    def test_residual_reduction_uses_remaining_residual_after_correction(self) -> None:
+        residual_before = [10.0, 10.0]
+        residual_model_pred = [8.0, -5.0]
+        residual_after = [before - pred for before, pred in zip(residual_before, residual_model_pred)]
+
+        metrics = residual_reduction_from_residuals(residual_before, residual_after)
+
+        self.assertEqual(residual_after, [2.0, 15.0])
+        self.assertAlmostEqual(metrics["mae_before"], 10.0)
+        self.assertAlmostEqual(metrics["mae_after"], 8.5)
+        self.assertAlmostEqual(metrics["mae_reduction"], 1.5)
 
     def test_round_residual_summary_includes_baseline_round(self) -> None:
         baseline = pd.DataFrame(
