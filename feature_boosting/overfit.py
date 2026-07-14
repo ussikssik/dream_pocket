@@ -11,13 +11,13 @@ def recommend_overfit_safe_settings(
     n_base_features: int = 0,
     metric_name: str = "rmse",
 ) -> dict[str, Any]:
-    """Return conservative residual-model and guard settings for early trials.
+    """Return conservative residual-model settings for early trials.
 
     The residual booster fits one small model per candidate feature. Even so,
     many candidate features create a multiple-comparison risk: train residual
     can shrink while validation/test residual gets worse. This helper lowers
-    residual-model capacity and tightens validation guards when the dataset is
-    small or the candidate count is high relative to train rows.
+    residual-model capacity when the dataset is small or the candidate count
+    is high relative to train rows. Candidate rejection is intentionally disabled.
     """
     params = dict(residual_model_params or {})
     n_train = max(int(n_train_rows), 1)
@@ -51,7 +51,7 @@ def recommend_overfit_safe_settings(
         raise ValueError(f"unsupported metric_name: {metric_name!r}")
 
     guard = {
-        "overfit_guard_enabled": True,
+        "overfit_guard_enabled": False,
         "overfit_guard_metric_scope": "bad",
         "overfit_guard_metric_name": guard_metric,
         "overfit_guard_min_valid_reduction": 0.0,
@@ -77,11 +77,7 @@ def recommend_overfit_safe_settings(
             {"setting": "base_features", "value": int(n_base_features)},
             {"setting": "candidate_features_per_train_row", "value": round(pressure, 4)},
             {"setting": "residual_param_changes", "value": "; ".join(changes) if changes else "none"},
-            {"setting": "overfit_guard_metric_name", "value": guard["overfit_guard_metric_name"]},
-            {"setting": "overfit_guard_max_valid_after_over_baseline", "value": guard["overfit_guard_max_valid_after_over_baseline"]},
-            {"setting": "overfit_guard_max_valid_train_gap", "value": guard["overfit_guard_max_valid_train_gap"]},
-            {"setting": "overfit_guard_use_test", "value": guard["overfit_guard_use_test"]},
-            {"setting": "overfit_guard_max_test_after_over_baseline", "value": guard["overfit_guard_max_test_after_over_baseline"]},
+            {"setting": "candidate_overfit_rejection", "value": "disabled"},
         ],
     }
 

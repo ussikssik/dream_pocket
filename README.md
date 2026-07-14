@@ -16,7 +16,7 @@ notebooks/residual_feature_boosting_poc.ipynb
 
 처음 clone한 직후에는 실제 데이터가 없어도 됩니다. 노트북 기본값이 `USE_DEMO_DATA = True`라서 실행 중에 toyset을 자동으로 만듭니다.
 
-노트북 기본 toyset 크기는 wafer 14,000매, candidate feature 5,000개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
+노트북 기본 toyset 크기는 wafer 2,000매, candidate feature 100개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
 
 ```python
 USE_DEMO_DATA = True
@@ -46,17 +46,13 @@ BOOSTING_SELECTION_THRESHOLD = 0.2
 BOOSTING_MAX_SELECT_PER_ROUND = None
 ```
 
-Overfit guard is enabled by default. A candidate feature can appear in the
-ranking chart, but it is not selected if validation residual gets worse than
-the base-feature baseline or if validation improvement is much weaker than
-train improvement.
+자동 overfit-safe 설정은 켜져 있으며 데이터 크기와 후보 feature 수에 따라
+단일-feature residual probe 모델의 iterations, depth, learning rate, regularization을
+보수적으로 조정합니다. 이 설정은 후보 feature를 탈락시키지 않습니다.
 
 ```python
 AUTO_OVERFIT_SAFE_SETTINGS = True
-OVERFIT_GUARD_ENABLED = True
-OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = 1.0
-OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = 0.25
-OVERFIT_GUARD_USE_TEST = False  # set True only for exploratory checking
+OVERFIT_GUARD_ENABLED = False
 ```
 
 정답인자가 있으면 defect별로 넣어두면 candidate rank chart에 별도 마커로 표시됩니다.
@@ -155,6 +151,10 @@ round_mean_residual_summary.csv
 final_model_metrics.csv
 final_model_metric_summary.csv
 final_feature_set_summary.csv
+boosting_feature_metric_audit.csv
+boosting_iteration_audit.csv
+global_iteration_feature_metric_summary.csv
+test_raw_predictions_by_iteration.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
 plots/{defect_id}_round_{round}_candidate_loss.png
@@ -165,7 +165,7 @@ models/baseline_model.cbm
 models/final_model.cbm
 ```
 
-가장 중요한 원칙은 residual boosting 단계에서는 `Xb`를 다시 학습하지 않는 것입니다. 각 round에서는 후보 feature `x_j` 하나만으로 현재 residual을 예측하고, feature 선택은 validation bad group의 `bad_rmse_reduction` 기준으로 수행합니다. Test metric은 기록과 검증에만 사용합니다.
+가장 중요한 원칙은 후보 feature `x_j` 하나로 학습한 residual 모델은 순위 산정용 probe라는 점입니다. 각 round에서 top-k 또는 threshold로 feature를 선택한 뒤 `Xb + 지금까지 누적 선택된 feature`로 target `y`를 예측하는 base model을 다시 학습합니다. 새 예측의 residual과 누적 feature는 다음 round와 다음 defect로 전달됩니다. 후보 ranking metric은 `(직전 residual loss - probe 적용 후 residual loss) / 직전 residual loss`이며, iteration별 R2/MAE/RMSE는 누적 base-model 재학습 결과로 기록합니다.
 
 ## 핵심 원칙
 

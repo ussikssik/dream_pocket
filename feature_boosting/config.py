@@ -48,7 +48,7 @@ class BoostingConfig:
     max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
-    overfit_guard_enabled: bool = True
+    overfit_guard_enabled: bool = False
     overfit_guard_metric_scope: str = "bad"
     overfit_guard_min_valid_rmse_reduction: float | None = 0.0
     overfit_guard_max_valid_after_over_baseline: float | None = 1.0

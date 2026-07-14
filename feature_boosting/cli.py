@@ -182,6 +182,8 @@ def run_experiment(config_path: Path) -> int:
             target_col=cols.target_col,
             id_col=cols.id_col,
             baseline_pred_col="baseline_pred",
+            base_feature_cols=base_feature_cols,
+            base_model_params=config.baseline_model,
             defect_id=defect.defect_id,
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
@@ -189,7 +191,6 @@ def run_experiment(config_path: Path) -> int:
             initial_predictions=sequential_predictions,
             previously_selected_features=global_selected_features,
             global_iter_start=global_iter_offset,
-            base_feature_count=len(base_feature_cols),
             output_dir=output_dir / "rankings",
         )
         if result.final_predictions:

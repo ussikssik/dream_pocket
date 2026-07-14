@@ -57,7 +57,7 @@ notebooks/residual_feature_boosting_poc.ipynb
 
 처음 clone한 직후에는 실제 데이터가 없어도 됩니다. 노트북 기본값이 `USE_DEMO_DATA = True`라서 실행 중에 toyset을 자동으로 만듭니다.
 
-노트북 기본 toyset 크기는 wafer 14,000매, candidate feature 5,000개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
+노트북 기본 toyset 크기는 wafer 2,000매, candidate feature 100개입니다. 노트북 상단 설정 셀에서 아래 값만 바꾸면 됩니다.
 
 ```python
 USE_DEMO_DATA = True
@@ -87,17 +87,13 @@ BOOSTING_SELECTION_THRESHOLD = 0.2
 BOOSTING_MAX_SELECT_PER_ROUND = None
 ```
 
-Overfit guard is enabled by default. A candidate feature can appear in the
-ranking chart, but it is not selected if validation residual gets worse than
-the base-feature baseline or if validation improvement is much weaker than
-train improvement.
+자동 overfit-safe 설정은 켜져 있으며 데이터 크기와 후보 feature 수에 따라
+단일-feature residual probe 모델의 iterations, depth, learning rate, regularization을
+보수적으로 조정합니다. 이 설정은 후보 feature를 탈락시키지 않습니다.
 
 ```python
 AUTO_OVERFIT_SAFE_SETTINGS = True
-OVERFIT_GUARD_ENABLED = True
-OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = 1.0
-OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = 0.25
-OVERFIT_GUARD_USE_TEST = False  # set True only for exploratory checking
+OVERFIT_GUARD_ENABLED = False
 ```
 
 정답인자가 있으면 defect별로 넣어두면 candidate rank chart에 별도 마커로 표시됩니다.
@@ -196,6 +192,10 @@ round_mean_residual_summary.csv
 final_model_metrics.csv
 final_model_metric_summary.csv
 final_feature_set_summary.csv
+boosting_feature_metric_audit.csv
+boosting_iteration_audit.csv
+global_iteration_feature_metric_summary.csv
+test_raw_predictions_by_iteration.csv
 shap_summary.csv
 rankings/{defect_id}_round_{round}.csv
 plots/{defect_id}_round_{round}_candidate_loss.png
@@ -206,7 +206,7 @@ models/baseline_model.cbm
 models/final_model.cbm
 ```
 
-가장 중요한 원칙은 residual boosting 단계에서는 `Xb`를 다시 학습하지 않는 것입니다. 각 round에서는 후보 feature `x_j` 하나만으로 현재 residual을 예측하고, feature 선택은 validation bad group의 `bad_rmse_reduction` 기준으로 수행합니다. Test metric은 기록과 검증에만 사용합니다.
+가장 중요한 원칙은 후보 feature `x_j` 하나로 학습한 residual 모델은 순위 산정용 probe라는 점입니다. 각 round에서 top-k 또는 threshold로 feature를 선택한 뒤 `Xb + 지금까지 누적 선택된 feature`로 target `y`를 예측하는 base model을 다시 학습합니다. 새 예측의 residual과 누적 feature는 다음 round와 다음 defect로 전달됩니다. 후보 ranking metric은 `(직전 residual loss - probe 적용 후 residual loss) / 직전 residual loss`이며, iteration별 R2/MAE/RMSE는 누적 base-model 재학습 결과로 기록합니다.
 
 ## 핵심 원칙
 
@@ -611,7 +611,7 @@ boosting:
   max_select_per_round:
   use_test_for_selection: false
   min_valid_bad_samples: 1
-  overfit_guard_enabled: true
+  overfit_guard_enabled: false
   overfit_guard_metric_scope: "bad"
   overfit_guard_min_valid_rmse_reduction: 0.0
   overfit_guard_max_valid_after_over_baseline: 1.0
@@ -1029,6 +1029,8 @@ def run_experiment(config_path: Path) -> int:
             target_col=cols.target_col,
             id_col=cols.id_col,
             baseline_pred_col="baseline_pred",
+            base_feature_cols=base_feature_cols,
+            base_model_params=config.baseline_model,
             defect_id=defect.defect_id,
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
@@ -1036,7 +1038,6 @@ def run_experiment(config_path: Path) -> int:
             initial_predictions=sequential_predictions,
             previously_selected_features=global_selected_features,
             global_iter_start=global_iter_offset,
-            base_feature_count=len(base_feature_cols),
             output_dir=output_dir / "rankings",
         )
         if result.final_predictions:
@@ -1239,7 +1240,7 @@ class BoostingConfig:
     max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
-    overfit_guard_enabled: bool = True
+    overfit_guard_enabled: bool = False
     overfit_guard_metric_scope: str = "bad"
     overfit_guard_min_valid_rmse_reduction: float | None = 0.0
     overfit_guard_max_valid_after_over_baseline: float | None = 1.0
@@ -2016,13 +2017,13 @@ def recommend_overfit_safe_settings(
     n_base_features: int = 0,
     metric_name: str = "rmse",
 ) -> dict[str, Any]:
-    """Return conservative residual-model and guard settings for early trials.
+    """Return conservative residual-model settings for early trials.
 
     The residual booster fits one small model per candidate feature. Even so,
     many candidate features create a multiple-comparison risk: train residual
     can shrink while validation/test residual gets worse. This helper lowers
-    residual-model capacity and tightens validation guards when the dataset is
-    small or the candidate count is high relative to train rows.
+    residual-model capacity when the dataset is small or the candidate count
+    is high relative to train rows. Candidate rejection is intentionally disabled.
     """
     params = dict(residual_model_params or {})
     n_train = max(int(n_train_rows), 1)
@@ -2056,7 +2057,7 @@ def recommend_overfit_safe_settings(
         raise ValueError(f"unsupported metric_name: {metric_name!r}")
 
     guard = {
-        "overfit_guard_enabled": True,
+        "overfit_guard_enabled": False,
         "overfit_guard_metric_scope": "bad",
         "overfit_guard_metric_name": guard_metric,
         "overfit_guard_min_valid_reduction": 0.0,
@@ -2082,11 +2083,7 @@ def recommend_overfit_safe_settings(
             {"setting": "base_features", "value": int(n_base_features)},
             {"setting": "candidate_features_per_train_row", "value": round(pressure, 4)},
             {"setting": "residual_param_changes", "value": "; ".join(changes) if changes else "none"},
-            {"setting": "overfit_guard_metric_name", "value": guard["overfit_guard_metric_name"]},
-            {"setting": "overfit_guard_max_valid_after_over_baseline", "value": guard["overfit_guard_max_valid_after_over_baseline"]},
-            {"setting": "overfit_guard_max_valid_train_gap", "value": guard["overfit_guard_max_valid_train_gap"]},
-            {"setting": "overfit_guard_use_test", "value": guard["overfit_guard_use_test"]},
-            {"setting": "overfit_guard_max_test_after_over_baseline", "value": guard["overfit_guard_max_test_after_over_baseline"]},
+            {"setting": "candidate_overfit_rejection", "value": "disabled"},
         ],
     }
 
@@ -2941,7 +2938,7 @@ class ResidualFeatureBoosterConfig:
     max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
-    overfit_guard_enabled: bool = True
+    overfit_guard_enabled: bool = False
     overfit_guard_metric_scope: str = "bad"
     overfit_guard_metric_name: str = "rmse"
     overfit_guard_min_valid_reduction: float | None = None
@@ -2987,6 +2984,8 @@ class ResidualFeatureBooster:
         target_col: str,
         id_col: str,
         baseline_pred_col: str,
+        base_feature_cols: list[str],
+        base_model_params: dict[str, Any],
         defect_id: str,
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
@@ -2995,7 +2994,6 @@ class ResidualFeatureBooster:
         initial_predictions: dict[str, np.ndarray] | None = None,
         previously_selected_features: set[str] | None = None,
         global_iter_start: int = 0,
-        base_feature_count: int = 0,
         output_dir: str | Path | None = None,
     ) -> BoostingResult:
         valid_bad_mask = valid_df[id_col].astype(str).isin(bad_sample_ids).to_numpy()
@@ -3017,10 +3015,18 @@ class ResidualFeatureBooster:
             },
         )
 
+        base_feature_cols = list(dict.fromkeys(str(feature) for feature in base_feature_cols))
+        _validate_model_feature_columns(
+            base_feature_cols,
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+        )
+        candidate_order = list(dict.fromkeys(str(feature) for feature in candidate_cols))
         cumulative_selected = {str(feature) for feature in (previously_selected_features or set())}
         remaining = [
             feature
-            for feature in dict.fromkeys(candidate_cols)
+            for feature in candidate_order
             if str(feature) not in cumulative_selected
         ]
         _ = always_rank_cols
@@ -3034,7 +3040,6 @@ class ResidualFeatureBooster:
             output_dir.mkdir(parents=True, exist_ok=True)
 
         quality_lookup = _quality_lookup(quality_summary)
-        main_metric = _main_metric_name(self.config.main_metric, self.config.use_test_for_selection)
         selection_metric = _main_metric_name(self.config.selection_metric or self.config.main_metric, self.config.use_test_for_selection)
         higher_is_better = _higher_is_better(selection_metric, self.config.selection_direction)
 
@@ -3093,8 +3098,9 @@ class ResidualFeatureBooster:
             for payload in payloads:
                 feature_name = str(payload.row.get("feature_name", ""))
                 payload.row["global_iter"] = global_iter
-                payload.row["n_base_features"] = int(base_feature_count)
+                payload.row["n_base_features"] = len(base_feature_cols)
                 payload.row["n_selected_before_iter"] = len(cumulative_selected)
+                payload.row["metric_source"] = "single_feature_residual_probe"
                 payload.row["eligible_for_selection"] = feature_name in remaining_set
                 payload.row["ranking_only"] = feature_name not in remaining_set
                 payload.row["already_selected"] = feature_name not in remaining_set
@@ -3113,7 +3119,6 @@ class ResidualFeatureBooster:
                 payload
                 for payload in payloads
                 if not payload.row.get("fail_reason")
-                and (not self.config.overfit_guard_enabled or bool(payload.row.get("overfit_guard_pass", False)))
                 and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
                 and bool(payload.row.get("eligible_for_selection", True))
@@ -3127,16 +3132,39 @@ class ResidualFeatureBooster:
             if output_dir is not None:
                 ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
 
+            n_selected_before = len(cumulative_selected)
             for payload in selected_payloads:
                 payload.row["ranking_metric"] = selection_metric
                 feature = str(payload.row["feature_name"])
-                current_pred_train = current_pred_train + payload.pred_train
-                current_pred_valid = current_pred_valid + payload.pred_valid
-                current_pred_test = current_pred_test + payload.pred_test
                 cumulative_selected.add(feature)
                 payload.row["n_cumulative_selected"] = len(cumulative_selected)
-                payload.row["n_effective_features"] = int(base_feature_count) + len(cumulative_selected)
+                payload.row["n_effective_features"] = len(base_feature_cols) + len(cumulative_selected)
                 selected_records.append(_selected_record(payload.row))
+                remaining = [candidate for candidate in remaining if candidate != feature]
+
+            if selected_payloads:
+                cumulative_feature_cols = _cumulative_model_features(
+                    base_feature_cols,
+                    candidate_order,
+                    cumulative_selected,
+                )
+                current_pred_train, current_pred_valid, current_pred_test = _refit_cumulative_base_model(
+                    train_df=train_df,
+                    valid_df=valid_df,
+                    test_df=test_df,
+                    target_col=target_col,
+                    feature_cols=cumulative_feature_cols,
+                    base_model_params=base_model_params,
+                )
+
+            ranking["n_cumulative_selected_after_iter"] = len(cumulative_selected)
+            ranking["n_effective_features_after_iter"] = len(base_feature_cols) + len(cumulative_selected)
+            ranking["iteration_model"] = "cumulative_base_refit" if selected_payloads else "unchanged"
+            if output_dir is not None:
+                ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
+
+            for payload in selected_payloads:
+                feature = str(payload.row["feature_name"])
                 curve_records.append(
                     self._curve_record(
                         defect_id=defect_id,
@@ -3158,7 +3186,6 @@ class ResidualFeatureBooster:
                         good_sample_ids=good_sample_ids,
                     )
                 )
-                remaining = [candidate for candidate in remaining if candidate != feature]
 
             iteration_records.append(
                 _iteration_record(
@@ -3166,8 +3193,8 @@ class ResidualFeatureBooster:
                     round_idx=round_idx,
                     global_iter=global_iter,
                     selected_features=[str(payload.row["feature_name"]) for payload in selected_payloads],
-                    n_base_features=int(base_feature_count),
-                    n_selected_before=len(cumulative_selected) - len(selected_payloads),
+                    n_base_features=len(base_feature_cols),
+                    n_selected_before=n_selected_before,
                     n_cumulative_selected=len(cumulative_selected),
                     train_df=train_df,
                     valid_df=valid_df,
@@ -3549,6 +3576,76 @@ def _initial_predictions(
             raise ValueError(f"initial_predictions[{split!r}] contains NaN or inf")
         arrays[split] = values
     return arrays["train"], arrays["valid"], arrays["test"]
+
+
+def _validate_model_feature_columns(
+    feature_cols: list[str],
+    *,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> None:
+    if not feature_cols:
+        raise ValueError("base_feature_cols must contain at least one feature")
+    missing_by_split: dict[str, list[str]] = {}
+    for split, frame in (("train", train_df), ("valid", valid_df), ("test", test_df)):
+        missing = [feature for feature in feature_cols if feature not in frame.columns]
+        if missing:
+            missing_by_split[split] = missing
+    if missing_by_split:
+        details = "; ".join(
+            f"{split}={features[:10]}" for split, features in missing_by_split.items()
+        )
+        raise ValueError(f"model feature columns are missing: {details}")
+
+
+def _cumulative_model_features(
+    base_feature_cols: list[str],
+    candidate_order: list[str],
+    cumulative_selected: set[str],
+) -> list[str]:
+    selected_in_candidate_order = [
+        feature for feature in candidate_order if feature in cumulative_selected
+    ]
+    selected_extras = sorted(cumulative_selected.difference(selected_in_candidate_order))
+    return list(
+        dict.fromkeys([*base_feature_cols, *selected_in_candidate_order, *selected_extras])
+    )
+
+
+def _refit_cumulative_base_model(
+    *,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    feature_cols: list[str],
+    base_model_params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    _validate_model_feature_columns(
+        feature_cols,
+        train_df=train_df,
+        valid_df=valid_df,
+        test_df=test_df,
+    )
+    y_train = train_df[target_col].to_numpy(dtype=float)
+    y_valid = valid_df[target_col].to_numpy(dtype=float)
+    model = fit_regressor(
+        train_df,
+        y_train,
+        valid_df,
+        y_valid,
+        feature_cols,
+        base_model_params,
+    )
+    predictions = (
+        predict_regressor(model, train_df, feature_cols),
+        predict_regressor(model, valid_df, feature_cols),
+        predict_regressor(model, test_df, feature_cols),
+    )
+    if not _finite(*predictions):
+        raise ValueError("cumulative base model produced NaN or inf predictions")
+    return predictions
 
 
 def _iteration_record(
@@ -4787,10 +4884,37 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from feature_boosting.modeling import fit_regressor, predict_regressor
+from feature_boosting.overfit import recommend_overfit_safe_settings
 from feature_boosting.residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
 
 
 class ResidualBoostingTests(unittest.TestCase):
+    def test_auto_parameter_adjustment_remains_without_candidate_rejection(self) -> None:
+        recommendation = recommend_overfit_safe_settings(
+            {
+                "backend": "numpy",
+                "iterations": 1000,
+                "depth": 8,
+                "learning_rate": 0.2,
+                "l2": 1e-6,
+            },
+            n_train_rows=500,
+            n_candidate_features=1000,
+            metric_name="mae",
+        )
+
+        params = recommendation["residual_model_params"]
+        self.assertEqual(params["iterations"], 120)
+        self.assertEqual(params["depth"], 2)
+        self.assertEqual(params["learning_rate"], 0.03)
+        self.assertGreaterEqual(params["l2"], 20.0)
+        self.assertFalse(recommendation["guard"]["overfit_guard_enabled"])
+        self.assertIn(
+            {"setting": "candidate_overfit_rejection", "value": "disabled"},
+            recommendation["summary_rows"],
+        )
+
     def test_known_residual_feature_is_selected(self) -> None:
         df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
@@ -4815,6 +4939,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -4831,6 +4957,17 @@ class ResidualBoostingTests(unittest.TestCase):
         relative_improvement = float(ranking.loc["hidden", "valid_bad_rmse_reduction_over_before"])
         self.assertAlmostEqual(relative_improvement, (before - after) / before)
         self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_reduction_over_before")
+        expected_model = fit_regressor(
+            train_df,
+            train_df["yield"].to_numpy(dtype=float),
+            valid_df,
+            valid_df["yield"].to_numpy(dtype=float),
+            ["base_feature", "hidden"],
+            {"backend": "numpy"},
+        )
+        expected_valid = predict_regressor(expected_model, valid_df, ["base_feature", "hidden"])
+        np.testing.assert_allclose(result.final_predictions["valid"], expected_valid)
+        self.assertEqual(result.rankings[0]["iteration_model"].iloc[0], "cumulative_base_refit")
 
     def test_threshold_mode_selects_by_relative_improvement(self) -> None:
         df = _synthetic_frame()
@@ -4859,6 +4996,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -4892,6 +5031,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -4929,6 +5070,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -4940,8 +5083,8 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertFalse(bool(ranking.loc["noise_feature", "selected"]))
         self.assertEqual(result.selected_features["feature_name"].tolist(), ["hidden"])
 
-    def test_overfit_guard_rejects_train_only_signal(self) -> None:
-        df = _overfit_frame()
+    def test_overfit_guard_diagnostics_do_not_reject_candidate(self) -> None:
+        df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
         valid_df = df[df["split"] == "valid"].copy()
         test_df = df[df["split"] == "test"].copy()
@@ -4952,8 +5095,7 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy", "l2": 1e-6},
                 n_rounds=1,
                 overfit_guard_enabled=True,
-                overfit_guard_max_valid_after_over_baseline=1.0,
-                overfit_guard_max_valid_train_gap=0.25,
+                overfit_guard_max_valid_after_over_baseline=0.0,
                 show_progress=False,
             )
         )
@@ -4961,59 +5103,22 @@ class ResidualBoostingTests(unittest.TestCase):
             train_df=train_df,
             valid_df=valid_df,
             test_df=test_df,
-            candidate_cols=["train_only_signal"],
+            candidate_cols=["hidden"],
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=set(),
         )
 
-        self.assertTrue(result.selected_features.empty)
+        self.assertEqual(result.selected_features["feature_name"].tolist(), ["hidden"])
         ranking = result.rankings[0].set_index("feature_name")
         self.assertIn("train_bad_rmse_after_over_baseline", ranking.columns)
-        self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
-        self.assertIn("valid_bad_rmse_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
-
-    def test_overfit_guard_supports_mae(self) -> None:
-        df = _overfit_frame()
-        train_df = df[df["split"] == "train"].copy()
-        valid_df = df[df["split"] == "valid"].copy()
-        test_df = df[df["split"] == "test"].copy()
-        bad_ids = set(df["sample_id"])
-
-        booster = ResidualFeatureBooster(
-            ResidualFeatureBoosterConfig(
-                residual_model_params={"backend": "numpy", "l2": 1e-6},
-                n_rounds=1,
-                selection_metric="bad_mae_reduction",
-                overfit_guard_enabled=True,
-                overfit_guard_metric_name="mae",
-                overfit_guard_min_valid_reduction=0.0,
-                overfit_guard_max_valid_after_over_baseline=1.0,
-                overfit_guard_max_valid_train_gap=0.25,
-                show_progress=False,
-            )
-        )
-        result = booster.run_for_defect(
-            train_df=train_df,
-            valid_df=valid_df,
-            test_df=test_df,
-            candidate_cols=["train_only_signal"],
-            target_col="yield",
-            id_col="sample_id",
-            baseline_pred_col="baseline_pred",
-            defect_id="defect_1",
-            bad_sample_ids=bad_ids,
-            good_sample_ids=set(),
-        )
-
-        self.assertTrue(result.selected_features.empty)
-        ranking = result.rankings[0].set_index("feature_name")
-        self.assertEqual(ranking.loc["train_only_signal", "overfit_guard_metric"], "mae")
-        self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
-        self.assertIn("valid_bad_mae_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
+        self.assertFalse(bool(ranking.loc["hidden", "overfit_guard_pass"]))
+        self.assertIn("valid_bad_rmse_after_over_baseline", str(ranking.loc["hidden", "overfit_guard_reason"]))
 
     def test_zero_improvement_feature_is_not_selected(self) -> None:
         df = _synthetic_frame()
@@ -5039,6 +5144,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=set(),
@@ -5068,11 +5175,12 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=all_ids,
             good_sample_ids=set(),
             global_iter_start=0,
-            base_feature_count=2,
         )
         selected_first = set(first.selected_features["feature_name"].astype(str))
         second = booster.run_for_defect(
@@ -5083,13 +5191,14 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_2",
             bad_sample_ids=all_ids,
             good_sample_ids=set(),
             initial_predictions=first.final_predictions,
             previously_selected_features=selected_first,
             global_iter_start=len(first.rankings),
-            base_feature_count=2,
         )
 
         self.assertEqual(first.iteration_summary["global_iter"].tolist(), [1])
@@ -5100,7 +5209,7 @@ class ResidualBoostingTests(unittest.TestCase):
         second_valid_before = float(second.iteration_summary.loc[0, "valid_global_rmse_before"])
         self.assertAlmostEqual(first_valid_after, second_valid_before)
         self.assertEqual(int(second.iteration_summary.loc[0, "n_cumulative_selected"]), 2)
-        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 4)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 3)
         self.assertEqual(sorted(second.test_predictions["global_iter"].unique().tolist()), [2])
         self.assertIn("valid_bad_rmse_reduction_over_before", second.rankings[0].columns)
 
@@ -5120,6 +5229,7 @@ def _synthetic_frame() -> pd.DataFrame:
             "split": split,
             "yield": y,
             "baseline_pred": base,
+            "base_feature": base,
             "hidden": hidden,
             "noise_feature": noise_feature,
         }
@@ -5159,6 +5269,7 @@ def _sequential_frame() -> pd.DataFrame:
             "split": np.array(["train"] * 70 + ["valid"] * 25 + ["test"] * 25),
             "yield": baseline + 4.0 * hidden_1 + 2.0 * hidden_2,
             "baseline_pred": baseline,
+            "base_feature": baseline,
             "hidden_1": hidden_1,
             "hidden_2": hidden_2,
         }
@@ -5276,10 +5387,11 @@ VS Code/Jupyter에서 위에서 아래로 실행하는 노트북입니다.
 3. defect별 bad/good group 기준으로 candidate feature 품질 필터링
 4. candidate feature 하나만 사용해 current residual 예측
 5. validation bad group의 설정 metric reduction 기준으로 feature 선택
-6. 선택 feature를 `Xb + selected Xnew`에 추가해 final CatBoost 재학습
-7. baseline vs final metric, ranking, SHAP summary 저장
+6. 선택된 feature를 누적하고 `Xb + 누적 selected Xnew`로 base CatBoost를 매 round 다시 학습
+7. 재학습한 예측값의 residual을 다음 round와 다음 defect로 전달
+8. iter0부터 마지막 iter까지 metric, ranking, SHAP summary 저장
 
-중요: residual boosting 단계에서는 `Xb`를 다시 학습하지 않습니다. 후보 feature `x_j` 하나만 residual model에 사용합니다.
+중요: 후보별 단일 residual model은 순위 산정용 probe입니다. feature 선택 후에는 누적 feature 전체로 target `y`를 예측하는 base model을 다시 학습합니다.
 
 ## 0. 환경 준비
 
@@ -5514,9 +5626,9 @@ MIN_VALID_BAD_SAMPLES = 1
 BOOSTING_SHOW_PROGRESS = True
 BOOSTING_PROGRESS_EVERY = 100
 
-# Overfit guard: reject candidates that improve train residual but hurt validation.
+# Keep automatic residual-model parameter adjustment, but do not reject candidates with an overfit guard.
 AUTO_OVERFIT_SAFE_SETTINGS = True
-OVERFIT_GUARD_ENABLED = True
+OVERFIT_GUARD_ENABLED = False
 OVERFIT_GUARD_METRIC_SCOPE = "bad"  # "bad", "good", or "global"
 OVERFIT_GUARD_MIN_VALID_REDUCTION = 0.0
 OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = 1.0
@@ -5729,14 +5841,7 @@ if AUTO_OVERFIT_SAFE_SETTINGS:
         metric_name=EXPERIMENT_METRIC_LOWER,
     )
     RESIDUAL_MODEL_PARAMS = overfit_recommendation["residual_model_params"]
-    guard = overfit_recommendation["guard"]
-    OVERFIT_GUARD_ENABLED = guard["overfit_guard_enabled"]
-    OVERFIT_GUARD_METRIC_SCOPE = guard["overfit_guard_metric_scope"]
-    OVERFIT_GUARD_MIN_VALID_REDUCTION = guard["overfit_guard_min_valid_reduction"]
-    OVERFIT_GUARD_MAX_VALID_AFTER_OVER_BASELINE = guard["overfit_guard_max_valid_after_over_baseline"]
-    OVERFIT_GUARD_MAX_VALID_TRAIN_GAP = guard["overfit_guard_max_valid_train_gap"]
-    OVERFIT_GUARD_USE_TEST = guard["overfit_guard_use_test"]
-    OVERFIT_GUARD_MAX_TEST_AFTER_OVER_BASELINE = guard["overfit_guard_max_test_after_over_baseline"]
+    OVERFIT_GUARD_ENABLED = False
     overfit_preflight = pd.DataFrame(overfit_recommendation["summary_rows"])
     write_csv(overfit_preflight, OUT_DIR / "overfit_preflight_settings.csv")
     display(overfit_preflight)
@@ -5828,7 +5933,10 @@ display(baseline_summary.head(12))
 - defect별로 candidate feature 품질을 먼저 검사합니다.
 - 각 round마다 아직 선택되지 않은 candidate feature를 하나씩 residual model에 넣어 평가합니다.
 - 선택되는 feature 수는 설정에 따라 1개, 상위 K개, 또는 threshold 통과 feature 전체가 될 수 있습니다.
-- residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
+- 후보 순위 산정용 residual model은 `Xb`를 쓰지 않고 candidate feature `x_j` 하나만 사용합니다.
+- feature를 선택한 뒤에는 `Xb + 지금까지 선택된 모든 feature`로 base model을 target `y`에 다시 학습합니다.
+- 재학습된 base model의 residual과 선택 feature는 다음 round 및 다음 defect로 이어집니다.
+- 자동 overfit-safe 설정은 residual probe 모델의 복잡도만 조정하며 후보 feature를 탈락시키지 않습니다.
 - 기본 feature 선택은 validation bad group의 `EXPERIMENT_METRIC` reduction 기준입니다.
 - 노트북 설정에서 `top_k` 또는 `threshold` 방식으로 round별 선택 feature 수를 조절할 수 있습니다.
 - candidate rank chart의 y축은 `(previous loss - after loss) / previous loss` 상대 개선율입니다.
@@ -5839,7 +5947,7 @@ display(baseline_summary.head(12))
 - 각 round의 candidate별 after-boosting loss를 rank chart로 보여주고 PNG로 저장합니다.
 - 모든 boosting이 끝난 뒤 defect별 round 평균 절대 residual point chart를 보여줍니다.
 
-각 candidate feature는 `x_j -> current residual` 단일 feature 모델로만 평가됩니다. 선택 기준은 validation bad group의 residual 감소입니다.
+각 candidate feature는 `x_j -> current residual` 단일 feature probe로 평가됩니다. 선택 기준은 validation bad group의 상대 residual 감소이며, 선택 후 실제 iteration 성능은 누적 base-model 재학습 결과로 계산됩니다.
 
 **입력**: baseline prediction이 포함된 train/valid/test, candidate features, defect groups  
 **출력**: `quality_summary`, `selected_features`, `residual_curve`, `round_mean_residual`, `rankings/*.csv`, `plots/*candidate_loss.png`, `plots/round_mean_abs_residual_points.png`
@@ -5936,6 +6044,8 @@ for defect in DEFECTS:
         target_col=TARGET_COL,
         id_col=ID_COL,
         baseline_pred_col="baseline_pred",
+        base_feature_cols=base_feature_cols,
+        base_model_params=BASELINE_MODEL_PARAMS,
         defect_id=defect_id,
         bad_sample_ids=groups["bad"],
         good_sample_ids=groups["good"],
@@ -5943,7 +6053,6 @@ for defect in DEFECTS:
         initial_predictions=sequential_predictions,
         previously_selected_features=global_selected_features,
         global_iter_start=global_iter_offset,
-        base_feature_count=len(base_feature_cols),
         output_dir=OUT_DIR / "rankings",
     )
 
@@ -6329,6 +6438,8 @@ if NULL_BENCHMARK_ENABLED:
             target_col=TARGET_COL,
             id_col=ID_COL,
             baseline_pred_col="baseline_pred",
+            base_feature_cols=base_feature_cols,
+            base_model_params=BASELINE_MODEL_PARAMS,
             defect_id=defect_id,
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
@@ -6336,7 +6447,6 @@ if NULL_BENCHMARK_ENABLED:
             initial_predictions=null_sequential_predictions,
             previously_selected_features=null_global_selected_features,
             global_iter_start=null_global_iter_offset,
-            base_feature_count=len(base_feature_cols),
             output_dir=NULL_BENCHMARK_DIR / "competition_rankings",
         )
         if result.final_predictions:
@@ -7340,6 +7450,51 @@ def _score_residual_feature_set(feature_cols, *, defect_id, groups, stage, featu
     return _apply_block_overfit_guard(row)
 
 
+def _score_cumulative_base_feature_set(feature_cols, *, defect_id, groups, stage, feature_set_name):
+    full_feature_cols = list(dict.fromkeys([*base_feature_cols, *feature_cols]))
+    row = {
+        "defect_id": defect_id,
+        "stage": stage,
+        "feature_set_name": feature_set_name,
+        "feature_name": feature_set_name,
+        "n_features": len(feature_cols),
+        "feature_names": "|".join(feature_cols),
+        "iteration_model": "cumulative_base_refit",
+        "fail_reason": "",
+    }
+    missing = [col for col in full_feature_cols if col not in train_df.columns]
+    if missing:
+        row["fail_reason"] = f"missing_column:{missing[:3]}"
+        return row
+
+    y_train = train_df[TARGET_COL].to_numpy(dtype=float)
+    y_valid = valid_df[TARGET_COL].to_numpy(dtype=float)
+    y_test = test_df[TARGET_COL].to_numpy(dtype=float)
+    base_train = train_df["baseline_pred"].to_numpy(dtype=float)
+    base_valid = valid_df["baseline_pred"].to_numpy(dtype=float)
+    base_test = test_df["baseline_pred"].to_numpy(dtype=float)
+
+    try:
+        model = fit_regressor(train_df, y_train, valid_df, y_valid, full_feature_cols, BASELINE_MODEL_PARAMS)
+        pred_train = predict_regressor(model, train_df, full_feature_cols)
+        pred_valid = predict_regressor(model, valid_df, full_feature_cols)
+        pred_test = predict_regressor(model, test_df, full_feature_cols)
+    except Exception as exc:
+        row["fail_reason"] = f"model_fit_failed:{type(exc).__name__}"
+        return row
+
+    for prefix, frame, y, before_pred, after_pred in (
+        ("train", train_df, y_train, base_train, pred_train),
+        ("valid", valid_df, y_valid, base_valid, pred_valid),
+        ("test", test_df, y_test, base_test, pred_test),
+    ):
+        _add_block_split_metrics(
+            row, prefix=prefix, df=frame, y=y, before_pred=before_pred,
+            after_pred=after_pred, baseline_pred=before_pred, groups=groups,
+        )
+    return row
+
+
 def _rank_block_rows(frame, *, metric_col, higher_is_better):
     if frame.empty:
         return frame
@@ -7356,7 +7511,6 @@ def _select_from_ranked_frame(frame, *, metric_col, mode, top_k, threshold, high
         return frame.iloc[0:0].copy()
     eligible = frame[
         frame["fail_reason"].fillna("").astype(str).eq("")
-        & frame["overfit_guard_pass"].fillna(False).astype(bool)
         & pd.to_numeric(frame[metric_col], errors="coerce").notna()
     ].copy()
     if eligible.empty:
@@ -7438,6 +7592,8 @@ if BLOCK_EXPERIMENT_ENABLED:
             target_col=TARGET_COL,
             id_col=ID_COL,
             baseline_pred_col="baseline_pred",
+            base_feature_cols=base_feature_cols,
+            base_model_params=BASELINE_MODEL_PARAMS,
             defect_id=defect_id,
             bad_sample_ids=groups["bad"],
             good_sample_ids=groups["good"],
@@ -7668,7 +7824,7 @@ if BLOCK_EXPERIMENT_ENABLED:
 
         block_features = _selected_feature_list(block_selected_features, defect_id=defect_id)
         if block_features:
-            block_set_row = _score_residual_feature_set(
+            block_set_row = _score_cumulative_base_feature_set(
                 block_features,
                 defect_id=defect_id,
                 groups=defect_groups[defect_id],
@@ -7680,7 +7836,7 @@ if BLOCK_EXPERIMENT_ENABLED:
                 {
                     "defect_id": defect_id,
                     "method": "block_preselection_then_feature",
-                    "metric_source": "selected feature set refit",
+                    "metric_source": "cumulative base-model refit",
                     "selected_features": ", ".join(block_features),
                     "metric_name": EXPERIMENT_METRIC_LOWER,
                     "valid_bad_loss_after": block_set_row.get(f"valid_bad_{EXPERIMENT_METRIC_LOWER}_after", np.nan),

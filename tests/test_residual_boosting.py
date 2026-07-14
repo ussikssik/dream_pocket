@@ -5,10 +5,37 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from feature_boosting.modeling import fit_regressor, predict_regressor
+from feature_boosting.overfit import recommend_overfit_safe_settings
 from feature_boosting.residual_boosting import ResidualFeatureBooster, ResidualFeatureBoosterConfig
 
 
 class ResidualBoostingTests(unittest.TestCase):
+    def test_auto_parameter_adjustment_remains_without_candidate_rejection(self) -> None:
+        recommendation = recommend_overfit_safe_settings(
+            {
+                "backend": "numpy",
+                "iterations": 1000,
+                "depth": 8,
+                "learning_rate": 0.2,
+                "l2": 1e-6,
+            },
+            n_train_rows=500,
+            n_candidate_features=1000,
+            metric_name="mae",
+        )
+
+        params = recommendation["residual_model_params"]
+        self.assertEqual(params["iterations"], 120)
+        self.assertEqual(params["depth"], 2)
+        self.assertEqual(params["learning_rate"], 0.03)
+        self.assertGreaterEqual(params["l2"], 20.0)
+        self.assertFalse(recommendation["guard"]["overfit_guard_enabled"])
+        self.assertIn(
+            {"setting": "candidate_overfit_rejection", "value": "disabled"},
+            recommendation["summary_rows"],
+        )
+
     def test_known_residual_feature_is_selected(self) -> None:
         df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
@@ -33,6 +60,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -49,6 +78,17 @@ class ResidualBoostingTests(unittest.TestCase):
         relative_improvement = float(ranking.loc["hidden", "valid_bad_rmse_reduction_over_before"])
         self.assertAlmostEqual(relative_improvement, (before - after) / before)
         self.assertEqual(ranking.loc["hidden", "ranking_metric"], "valid_bad_rmse_reduction_over_before")
+        expected_model = fit_regressor(
+            train_df,
+            train_df["yield"].to_numpy(dtype=float),
+            valid_df,
+            valid_df["yield"].to_numpy(dtype=float),
+            ["base_feature", "hidden"],
+            {"backend": "numpy"},
+        )
+        expected_valid = predict_regressor(expected_model, valid_df, ["base_feature", "hidden"])
+        np.testing.assert_allclose(result.final_predictions["valid"], expected_valid)
+        self.assertEqual(result.rankings[0]["iteration_model"].iloc[0], "cumulative_base_refit")
 
     def test_threshold_mode_selects_by_relative_improvement(self) -> None:
         df = _synthetic_frame()
@@ -77,6 +117,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -110,6 +152,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -147,6 +191,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=good_ids,
@@ -158,8 +204,8 @@ class ResidualBoostingTests(unittest.TestCase):
         self.assertFalse(bool(ranking.loc["noise_feature", "selected"]))
         self.assertEqual(result.selected_features["feature_name"].tolist(), ["hidden"])
 
-    def test_overfit_guard_rejects_train_only_signal(self) -> None:
-        df = _overfit_frame()
+    def test_overfit_guard_diagnostics_do_not_reject_candidate(self) -> None:
+        df = _synthetic_frame()
         train_df = df[df["split"] == "train"].copy()
         valid_df = df[df["split"] == "valid"].copy()
         test_df = df[df["split"] == "test"].copy()
@@ -170,8 +216,7 @@ class ResidualBoostingTests(unittest.TestCase):
                 residual_model_params={"backend": "numpy", "l2": 1e-6},
                 n_rounds=1,
                 overfit_guard_enabled=True,
-                overfit_guard_max_valid_after_over_baseline=1.0,
-                overfit_guard_max_valid_train_gap=0.25,
+                overfit_guard_max_valid_after_over_baseline=0.0,
                 show_progress=False,
             )
         )
@@ -179,59 +224,22 @@ class ResidualBoostingTests(unittest.TestCase):
             train_df=train_df,
             valid_df=valid_df,
             test_df=test_df,
-            candidate_cols=["train_only_signal"],
+            candidate_cols=["hidden"],
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=set(),
         )
 
-        self.assertTrue(result.selected_features.empty)
+        self.assertEqual(result.selected_features["feature_name"].tolist(), ["hidden"])
         ranking = result.rankings[0].set_index("feature_name")
         self.assertIn("train_bad_rmse_after_over_baseline", ranking.columns)
-        self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
-        self.assertIn("valid_bad_rmse_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
-
-    def test_overfit_guard_supports_mae(self) -> None:
-        df = _overfit_frame()
-        train_df = df[df["split"] == "train"].copy()
-        valid_df = df[df["split"] == "valid"].copy()
-        test_df = df[df["split"] == "test"].copy()
-        bad_ids = set(df["sample_id"])
-
-        booster = ResidualFeatureBooster(
-            ResidualFeatureBoosterConfig(
-                residual_model_params={"backend": "numpy", "l2": 1e-6},
-                n_rounds=1,
-                selection_metric="bad_mae_reduction",
-                overfit_guard_enabled=True,
-                overfit_guard_metric_name="mae",
-                overfit_guard_min_valid_reduction=0.0,
-                overfit_guard_max_valid_after_over_baseline=1.0,
-                overfit_guard_max_valid_train_gap=0.25,
-                show_progress=False,
-            )
-        )
-        result = booster.run_for_defect(
-            train_df=train_df,
-            valid_df=valid_df,
-            test_df=test_df,
-            candidate_cols=["train_only_signal"],
-            target_col="yield",
-            id_col="sample_id",
-            baseline_pred_col="baseline_pred",
-            defect_id="defect_1",
-            bad_sample_ids=bad_ids,
-            good_sample_ids=set(),
-        )
-
-        self.assertTrue(result.selected_features.empty)
-        ranking = result.rankings[0].set_index("feature_name")
-        self.assertEqual(ranking.loc["train_only_signal", "overfit_guard_metric"], "mae")
-        self.assertFalse(bool(ranking.loc["train_only_signal", "overfit_guard_pass"]))
-        self.assertIn("valid_bad_mae_after_over_baseline", str(ranking.loc["train_only_signal", "overfit_guard_reason"]))
+        self.assertFalse(bool(ranking.loc["hidden", "overfit_guard_pass"]))
+        self.assertIn("valid_bad_rmse_after_over_baseline", str(ranking.loc["hidden", "overfit_guard_reason"]))
 
     def test_zero_improvement_feature_is_not_selected(self) -> None:
         df = _synthetic_frame()
@@ -257,6 +265,8 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=bad_ids,
             good_sample_ids=set(),
@@ -286,11 +296,12 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_1",
             bad_sample_ids=all_ids,
             good_sample_ids=set(),
             global_iter_start=0,
-            base_feature_count=2,
         )
         selected_first = set(first.selected_features["feature_name"].astype(str))
         second = booster.run_for_defect(
@@ -301,13 +312,14 @@ class ResidualBoostingTests(unittest.TestCase):
             target_col="yield",
             id_col="sample_id",
             baseline_pred_col="baseline_pred",
+            base_feature_cols=["base_feature"],
+            base_model_params={"backend": "numpy"},
             defect_id="defect_2",
             bad_sample_ids=all_ids,
             good_sample_ids=set(),
             initial_predictions=first.final_predictions,
             previously_selected_features=selected_first,
             global_iter_start=len(first.rankings),
-            base_feature_count=2,
         )
 
         self.assertEqual(first.iteration_summary["global_iter"].tolist(), [1])
@@ -318,7 +330,7 @@ class ResidualBoostingTests(unittest.TestCase):
         second_valid_before = float(second.iteration_summary.loc[0, "valid_global_rmse_before"])
         self.assertAlmostEqual(first_valid_after, second_valid_before)
         self.assertEqual(int(second.iteration_summary.loc[0, "n_cumulative_selected"]), 2)
-        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 4)
+        self.assertEqual(int(second.iteration_summary.loc[0, "n_effective_features"]), 3)
         self.assertEqual(sorted(second.test_predictions["global_iter"].unique().tolist()), [2])
         self.assertIn("valid_bad_rmse_reduction_over_before", second.rankings[0].columns)
 
@@ -338,6 +350,7 @@ def _synthetic_frame() -> pd.DataFrame:
             "split": split,
             "yield": y,
             "baseline_pred": base,
+            "base_feature": base,
             "hidden": hidden,
             "noise_feature": noise_feature,
         }
@@ -377,6 +390,7 @@ def _sequential_frame() -> pd.DataFrame:
             "split": np.array(["train"] * 70 + ["valid"] * 25 + ["test"] * 25),
             "yield": baseline + 4.0 * hidden_1 + 2.0 * hidden_2,
             "baseline_pred": baseline,
+            "base_feature": baseline,
             "hidden_1": hidden_1,
             "hidden_2": hidden_2,
         }

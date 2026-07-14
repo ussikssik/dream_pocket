@@ -33,7 +33,7 @@ class ResidualFeatureBoosterConfig:
     max_select_per_round: int | None = None
     use_test_for_selection: bool = False
     min_valid_bad_samples: int = 1
-    overfit_guard_enabled: bool = True
+    overfit_guard_enabled: bool = False
     overfit_guard_metric_scope: str = "bad"
     overfit_guard_metric_name: str = "rmse"
     overfit_guard_min_valid_reduction: float | None = None
@@ -79,6 +79,8 @@ class ResidualFeatureBooster:
         target_col: str,
         id_col: str,
         baseline_pred_col: str,
+        base_feature_cols: list[str],
+        base_model_params: dict[str, Any],
         defect_id: str,
         bad_sample_ids: set[str],
         good_sample_ids: set[str],
@@ -87,7 +89,6 @@ class ResidualFeatureBooster:
         initial_predictions: dict[str, np.ndarray] | None = None,
         previously_selected_features: set[str] | None = None,
         global_iter_start: int = 0,
-        base_feature_count: int = 0,
         output_dir: str | Path | None = None,
     ) -> BoostingResult:
         valid_bad_mask = valid_df[id_col].astype(str).isin(bad_sample_ids).to_numpy()
@@ -109,10 +110,18 @@ class ResidualFeatureBooster:
             },
         )
 
+        base_feature_cols = list(dict.fromkeys(str(feature) for feature in base_feature_cols))
+        _validate_model_feature_columns(
+            base_feature_cols,
+            train_df=train_df,
+            valid_df=valid_df,
+            test_df=test_df,
+        )
+        candidate_order = list(dict.fromkeys(str(feature) for feature in candidate_cols))
         cumulative_selected = {str(feature) for feature in (previously_selected_features or set())}
         remaining = [
             feature
-            for feature in dict.fromkeys(candidate_cols)
+            for feature in candidate_order
             if str(feature) not in cumulative_selected
         ]
         _ = always_rank_cols
@@ -126,7 +135,6 @@ class ResidualFeatureBooster:
             output_dir.mkdir(parents=True, exist_ok=True)
 
         quality_lookup = _quality_lookup(quality_summary)
-        main_metric = _main_metric_name(self.config.main_metric, self.config.use_test_for_selection)
         selection_metric = _main_metric_name(self.config.selection_metric or self.config.main_metric, self.config.use_test_for_selection)
         higher_is_better = _higher_is_better(selection_metric, self.config.selection_direction)
 
@@ -185,8 +193,9 @@ class ResidualFeatureBooster:
             for payload in payloads:
                 feature_name = str(payload.row.get("feature_name", ""))
                 payload.row["global_iter"] = global_iter
-                payload.row["n_base_features"] = int(base_feature_count)
+                payload.row["n_base_features"] = len(base_feature_cols)
                 payload.row["n_selected_before_iter"] = len(cumulative_selected)
+                payload.row["metric_source"] = "single_feature_residual_probe"
                 payload.row["eligible_for_selection"] = feature_name in remaining_set
                 payload.row["ranking_only"] = feature_name not in remaining_set
                 payload.row["already_selected"] = feature_name not in remaining_set
@@ -205,7 +214,6 @@ class ResidualFeatureBooster:
                 payload
                 for payload in payloads
                 if not payload.row.get("fail_reason")
-                and (not self.config.overfit_guard_enabled or bool(payload.row.get("overfit_guard_pass", False)))
                 and np.isfinite(float(payload.row.get(selection_metric, np.nan)))
                 and payload.model is not None
                 and bool(payload.row.get("eligible_for_selection", True))
@@ -219,16 +227,39 @@ class ResidualFeatureBooster:
             if output_dir is not None:
                 ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
 
+            n_selected_before = len(cumulative_selected)
             for payload in selected_payloads:
                 payload.row["ranking_metric"] = selection_metric
                 feature = str(payload.row["feature_name"])
-                current_pred_train = current_pred_train + payload.pred_train
-                current_pred_valid = current_pred_valid + payload.pred_valid
-                current_pred_test = current_pred_test + payload.pred_test
                 cumulative_selected.add(feature)
                 payload.row["n_cumulative_selected"] = len(cumulative_selected)
-                payload.row["n_effective_features"] = int(base_feature_count) + len(cumulative_selected)
+                payload.row["n_effective_features"] = len(base_feature_cols) + len(cumulative_selected)
                 selected_records.append(_selected_record(payload.row))
+                remaining = [candidate for candidate in remaining if candidate != feature]
+
+            if selected_payloads:
+                cumulative_feature_cols = _cumulative_model_features(
+                    base_feature_cols,
+                    candidate_order,
+                    cumulative_selected,
+                )
+                current_pred_train, current_pred_valid, current_pred_test = _refit_cumulative_base_model(
+                    train_df=train_df,
+                    valid_df=valid_df,
+                    test_df=test_df,
+                    target_col=target_col,
+                    feature_cols=cumulative_feature_cols,
+                    base_model_params=base_model_params,
+                )
+
+            ranking["n_cumulative_selected_after_iter"] = len(cumulative_selected)
+            ranking["n_effective_features_after_iter"] = len(base_feature_cols) + len(cumulative_selected)
+            ranking["iteration_model"] = "cumulative_base_refit" if selected_payloads else "unchanged"
+            if output_dir is not None:
+                ranking.to_csv(output_dir / f"{defect_id}_round_{round_idx}.csv", index=False, encoding="utf-8-sig")
+
+            for payload in selected_payloads:
+                feature = str(payload.row["feature_name"])
                 curve_records.append(
                     self._curve_record(
                         defect_id=defect_id,
@@ -250,7 +281,6 @@ class ResidualFeatureBooster:
                         good_sample_ids=good_sample_ids,
                     )
                 )
-                remaining = [candidate for candidate in remaining if candidate != feature]
 
             iteration_records.append(
                 _iteration_record(
@@ -258,8 +288,8 @@ class ResidualFeatureBooster:
                     round_idx=round_idx,
                     global_iter=global_iter,
                     selected_features=[str(payload.row["feature_name"]) for payload in selected_payloads],
-                    n_base_features=int(base_feature_count),
-                    n_selected_before=len(cumulative_selected) - len(selected_payloads),
+                    n_base_features=len(base_feature_cols),
+                    n_selected_before=n_selected_before,
                     n_cumulative_selected=len(cumulative_selected),
                     train_df=train_df,
                     valid_df=valid_df,
@@ -641,6 +671,76 @@ def _initial_predictions(
             raise ValueError(f"initial_predictions[{split!r}] contains NaN or inf")
         arrays[split] = values
     return arrays["train"], arrays["valid"], arrays["test"]
+
+
+def _validate_model_feature_columns(
+    feature_cols: list[str],
+    *,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+) -> None:
+    if not feature_cols:
+        raise ValueError("base_feature_cols must contain at least one feature")
+    missing_by_split: dict[str, list[str]] = {}
+    for split, frame in (("train", train_df), ("valid", valid_df), ("test", test_df)):
+        missing = [feature for feature in feature_cols if feature not in frame.columns]
+        if missing:
+            missing_by_split[split] = missing
+    if missing_by_split:
+        details = "; ".join(
+            f"{split}={features[:10]}" for split, features in missing_by_split.items()
+        )
+        raise ValueError(f"model feature columns are missing: {details}")
+
+
+def _cumulative_model_features(
+    base_feature_cols: list[str],
+    candidate_order: list[str],
+    cumulative_selected: set[str],
+) -> list[str]:
+    selected_in_candidate_order = [
+        feature for feature in candidate_order if feature in cumulative_selected
+    ]
+    selected_extras = sorted(cumulative_selected.difference(selected_in_candidate_order))
+    return list(
+        dict.fromkeys([*base_feature_cols, *selected_in_candidate_order, *selected_extras])
+    )
+
+
+def _refit_cumulative_base_model(
+    *,
+    train_df: pd.DataFrame,
+    valid_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    target_col: str,
+    feature_cols: list[str],
+    base_model_params: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    _validate_model_feature_columns(
+        feature_cols,
+        train_df=train_df,
+        valid_df=valid_df,
+        test_df=test_df,
+    )
+    y_train = train_df[target_col].to_numpy(dtype=float)
+    y_valid = valid_df[target_col].to_numpy(dtype=float)
+    model = fit_regressor(
+        train_df,
+        y_train,
+        valid_df,
+        y_valid,
+        feature_cols,
+        base_model_params,
+    )
+    predictions = (
+        predict_regressor(model, train_df, feature_cols),
+        predict_regressor(model, valid_df, feature_cols),
+        predict_regressor(model, test_df, feature_cols),
+    )
+    if not _finite(*predictions):
+        raise ValueError("cumulative base model produced NaN or inf predictions")
+    return predictions
 
 
 def _iteration_record(
