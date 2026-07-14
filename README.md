@@ -152,6 +152,7 @@ final_model_metrics.csv
 final_model_metric_summary.csv
 final_feature_set_summary.csv
 boosting_feature_metric_audit.csv
+selected_answer_feature_metrics_by_iteration.csv
 boosting_iteration_audit.csv
 global_iteration_feature_metric_summary.csv
 test_raw_predictions_by_iteration.csv

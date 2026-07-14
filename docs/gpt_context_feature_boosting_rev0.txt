@@ -193,6 +193,7 @@ final_model_metrics.csv
 final_model_metric_summary.csv
 final_feature_set_summary.csv
 boosting_feature_metric_audit.csv
+selected_answer_feature_metrics_by_iteration.csv
 boosting_iteration_audit.csv
 global_iteration_feature_metric_summary.csv
 test_raw_predictions_by_iteration.csv
@@ -5950,7 +5951,20 @@ display(baseline_summary.head(12))
 각 candidate feature는 `x_j -> current residual` 단일 feature probe로 평가됩니다. 선택 기준은 validation bad group의 상대 residual 감소이며, 선택 후 실제 iteration 성능은 누적 base-model 재학습 결과로 계산됩니다.
 
 **입력**: baseline prediction이 포함된 train/valid/test, candidate features, defect groups  
-**출력**: `quality_summary`, `selected_features`, `residual_curve`, `round_mean_residual`, `rankings/*.csv`, `plots/*candidate_loss.png`, `plots/round_mean_abs_residual_points.png`
+
+### 주요 저장 파일
+
+| 확인 내용 | 저장 파일 | 주요 컬럼 |
+|---|---|---|
+| iter별 selected feature와 정답 feature의 ranking/probe metric | `selected_answer_feature_metrics_by_iteration.csv` | `global_iter`, `defect_id`, `round`, `feature_name`, `selected`, `is_answer_feature`, `answer_match_rule`, train/valid/test metric |
+| iter별 전체 candidate ranking/probe metric | `boosting_feature_metric_audit.csv` | 위 컬럼과 동일하며 모든 candidate 포함 |
+| iter0부터 iterN까지 train/valid/test R2, MAE, RMSE | `global_iteration_feature_metric_summary.csv` | `iter`, `defect_id`, `round`, `train_r2`, `train_mae`, `train_rmse`, `valid_*`, `test_*` |
+| iter별 base model feature 수 | `global_iteration_feature_metric_summary.csv` | `n_base_features`, `n_boosted_features`, `n_total_features` |
+| iter별 test wafer 예측값과 residual raw data | `test_raw_predictions_by_iteration.csv` | `iter`, sample ID, `y_true`, `pred_after`, `residual_after` |
+
+`n_base_features`는 최초 base feature 수라 고정입니다. 누적 선택 feature 수는 `n_boosted_features`, 실제 재학습 base model의 전체 feature 수는 `n_total_features`이며 iteration이 진행되면서 증가합니다.
+
+feature ranking 파일의 metric은 단일-feature residual probe 기준이고, `global_iteration_feature_metric_summary.csv`의 성능은 누적 feature로 base model을 재학습한 결과입니다.
 
 --- CELL 13 [code] ---
 standard_experiment_start_time = time.perf_counter()
@@ -6117,11 +6131,19 @@ residual_curve = pd.concat(curve_frames, ignore_index=True) if curve_frames else
 boosting_feature_audit = pd.concat(ranking_audit_frames, ignore_index=True) if ranking_audit_frames else pd.DataFrame()
 boosting_iteration_audit = pd.concat(iteration_audit_frames, ignore_index=True) if iteration_audit_frames else pd.DataFrame()
 boosting_test_predictions = pd.concat(test_prediction_frames, ignore_index=True) if test_prediction_frames else pd.DataFrame()
+if not boosting_feature_audit.empty:
+    selected_or_answer_mask = boosting_feature_audit["selected"].fillna(False).astype(bool)
+    if "is_answer_feature" in boosting_feature_audit.columns:
+        selected_or_answer_mask |= boosting_feature_audit["is_answer_feature"].fillna(False).astype(bool)
+    selected_answer_feature_metrics = boosting_feature_audit[selected_or_answer_mask].copy()
+else:
+    selected_answer_feature_metrics = pd.DataFrame()
 
 write_csv(quality_summary, OUT_DIR / "candidate_quality_summary.csv")
 write_csv(selected_features, OUT_DIR / "selected_features.csv")
 write_csv(residual_curve, OUT_DIR / "residual_reduction_curve.csv")
 write_csv(boosting_feature_audit, OUT_DIR / "boosting_feature_metric_audit.csv")
+write_csv(selected_answer_feature_metrics, OUT_DIR / "selected_answer_feature_metrics_by_iteration.csv")
 write_csv(boosting_iteration_audit, OUT_DIR / "boosting_iteration_audit.csv")
 write_csv(boosting_test_predictions, OUT_DIR / "boosting_test_predictions_by_iteration.csv")
 plot_residual_curve(
