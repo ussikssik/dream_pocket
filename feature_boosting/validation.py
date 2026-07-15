@@ -85,22 +85,30 @@ def profile_candidate_features(
             rows.append(_quality_row(feature, fail_reason="missing_column", config=config))
             continue
         series = df[feature]
-        numeric = pd.to_numeric(series, errors="coerce")
         non_null = series.notna()
+        is_categorical = _is_categorical_series(series)
+        if is_categorical:
+            valid_values = non_null
+            unique_count = int(series.dropna().astype("object").nunique())
+            feature_type = "categorical"
+        else:
+            numeric = pd.to_numeric(series, errors="coerce")
+            valid_values = numeric.notna()
+            unique_count = int(numeric.dropna().nunique())
+            feature_type = "numeric"
         missing_rate = float(1.0 - non_null.mean()) if len(series) else 1.0
-        unique_count = int(numeric.dropna().nunique())
-        train_coverage = _coverage(numeric[df[split_col].astype(str) == "train"])
-        valid_coverage = _coverage(numeric[df[split_col].astype(str) == "valid"])
-        test_coverage = _coverage(numeric[df[split_col].astype(str) == "test"])
-        bad_coverage = _coverage(numeric[bad_mask])
-        good_coverage = _coverage(numeric[good_mask])
+        train_coverage = _coverage(valid_values[df[split_col].astype(str) == "train"])
+        valid_coverage = _coverage(valid_values[df[split_col].astype(str) == "valid"])
+        test_coverage = _coverage(valid_values[df[split_col].astype(str) == "test"])
+        bad_coverage = _coverage(valid_values[bad_mask])
+        good_coverage = _coverage(valid_values[good_mask])
 
         reasons = []
         if feature in protected_cols or _looks_like_leakage(feature):
             reasons.append("leakage_like_feature")
         if non_null.sum() == 0:
             reasons.append("all_missing")
-        elif numeric.notna().sum() < non_null.sum():
+        elif not is_categorical and valid_values.sum() < non_null.sum():
             reasons.append("non_numeric")
         if unique_count < config.min_unique_values:
             reasons.append("constant_feature")
@@ -116,6 +124,7 @@ def profile_candidate_features(
         rows.append(
             {
                 "feature_name": feature,
+                "feature_type": feature_type,
                 "missing_rate": missing_rate,
                 "unique_count": unique_count,
                 "train_coverage": train_coverage,
@@ -139,6 +148,7 @@ def write_quality_summary(summary: pd.DataFrame, output_path: str | Path) -> Non
 def _quality_row(feature: str, fail_reason: str, config: FeatureFilterConfig) -> dict[str, object]:
     return {
         "feature_name": feature,
+        "feature_type": "missing",
         "missing_rate": np.nan,
         "unique_count": 0,
         "train_coverage": 0.0,
@@ -152,10 +162,19 @@ def _quality_row(feature: str, fail_reason: str, config: FeatureFilterConfig) ->
     }
 
 
-def _coverage(series: pd.Series) -> float:
-    if len(series) == 0:
+def _coverage(valid_values: pd.Series) -> float:
+    if len(valid_values) == 0:
         return 0.0
-    return float(pd.to_numeric(series, errors="coerce").notna().mean())
+    return float(valid_values.fillna(False).astype(bool).mean())
+
+
+def _is_categorical_series(series: pd.Series) -> bool:
+    dtype = series.dtype
+    return (
+        pd.api.types.is_object_dtype(dtype)
+        or pd.api.types.is_string_dtype(dtype)
+        or isinstance(dtype, pd.CategoricalDtype)
+    )
 
 
 def _looks_like_leakage(feature: str) -> bool:

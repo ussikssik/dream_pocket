@@ -82,6 +82,29 @@ class ValidationTests(unittest.TestCase):
         self.assertNotIn("low_bad_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
         self.assertNotIn("low_good_coverage", str(summary.loc["sparse_by_group", "fail_reason"]))
 
+    def test_categorical_candidate_passes_quality_filter(self) -> None:
+        df = pd.DataFrame(
+            {
+                "sample_id": ["a", "b", "c", "d", "e", "f"],
+                "split": ["train", "train", "valid", "valid", "test", "test"],
+                "tool_id": ["T1", "T2", "T1", "T2", "T1", "T2"],
+            }
+        )
+        summary = profile_candidate_features(
+            df,
+            ["tool_id"],
+            id_col="sample_id",
+            split_col="split",
+            bad_ids={"c", "e"},
+            good_ids={"d", "f"},
+            config=FeatureFilterConfig(max_missing_rate=0.5, min_unique_values=2, min_bad_coverage=0.5, min_good_coverage=0.5),
+        ).set_index("feature_name")
+
+        self.assertTrue(bool(summary.loc["tool_id", "is_pass"]))
+        self.assertEqual(summary.loc["tool_id", "feature_type"], "categorical")
+        self.assertNotIn("non_numeric", str(summary.loc["tool_id", "fail_reason"]))
+        self.assertNotIn("missing_split_values", str(summary.loc["tool_id", "fail_reason"]))
+
 
 if __name__ == "__main__":
     unittest.main()

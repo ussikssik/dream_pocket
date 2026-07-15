@@ -144,7 +144,7 @@ def _categorical_feature_indices(frame: pd.DataFrame) -> list[int]:
     return [
         idx
         for idx, col in enumerate(frame.columns)
-        if pd.api.types.is_object_dtype(frame[col]) or pd.api.types.is_categorical_dtype(frame[col])
+        if _is_categorical_series(frame[col])
     ]
 
 
@@ -155,6 +155,15 @@ def _numpy_l2(params: dict[str, Any]) -> float:
 def _prepare_catboost_frame(frame: pd.DataFrame) -> pd.DataFrame:
     prepared = frame.copy()
     for col in prepared.columns:
-        if pd.api.types.is_object_dtype(prepared[col]) or pd.api.types.is_categorical_dtype(prepared[col]):
+        if _is_categorical_series(prepared[col]):
             prepared[col] = prepared[col].astype("object").where(prepared[col].notna(), "__MISSING__")
     return prepared
+
+
+def _is_categorical_series(series: pd.Series) -> bool:
+    dtype = series.dtype
+    return (
+        pd.api.types.is_object_dtype(dtype)
+        or pd.api.types.is_string_dtype(dtype)
+        or isinstance(dtype, pd.CategoricalDtype)
+    )
